@@ -1,0 +1,30 @@
+{
+	"schemaVersion": 1,
+	"id": "wynncrafthelper",
+	"version": "${version}",
+	"name": "WynnCraft Helper",
+	"description": "Profession progression helper for Wynncraft",
+	"authors": [
+		"DetectiveTech"
+	],
+	"license": "MIT",
+	"icon": "assets/wynncrafthelper/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.detectivetech.wynncrafthelper.WynncraftHelperMod"
+		],
+		"client": [
+			"com.detectivetech.wynncrafthelper.WynncraftHelperClient"
+		],
+		"modmenu": [
+			"com.detectivetech.wynncrafthelper.WynncraftHelperModMenuApi"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
