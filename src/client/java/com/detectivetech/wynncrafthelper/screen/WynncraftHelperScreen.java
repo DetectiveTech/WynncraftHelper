@@ -111,6 +111,8 @@ public class WynncraftHelperScreen extends Screen {
 	private boolean professionSpeed;
 	private boolean doubleXpEvent;
 	private boolean showMaterials;
+	/** Tier (1/2/3) the player last selected in the breakdown tier preview, or 0 when none. */
+	private int breakdownSelectedTier = 0;
 	private boolean updatingInput;
 	private int ingredientPreset;
 	private boolean loading = true;
@@ -1286,6 +1288,7 @@ public class WynncraftHelperScreen extends Screen {
 		int newPreset = Math.max(1, Math.min(4, tier + 1));
 		ingredientPreset = newPreset;
 		ProfessionConfig.setIngredientPreset(newPreset);
+		breakdownSelectedTier = tier;
 		refreshLabels();
 		recompute();
 		if (detailOption != null) {
@@ -1602,16 +1605,19 @@ public class WynncraftHelperScreen extends Screen {
 		if (detailOption == null || detailOption.recipe == null) {
 			return;
 		}
-		int pinnedTier = detailOption.ingredient != null ? detailOption.ingredient.tierIndex() : 0;
+		// Use the tier the player selected in the breakdown preview (T1/T2/T3).
+		// Fall back to the option's ingredient tier, then 0 (all tiers).
+		int pinnedTier = breakdownSelectedTier > 0 ? breakdownSelectedTier
+			: (detailOption.ingredient != null ? detailOption.ingredient.tierIndex() : 0);
 		if (HudState.INSTANCE.isPinned(detailOption.recipe.internalName, pinnedTier)) {
 			HudState.INSTANCE.unpin();
 			return;
 		}
-		HudState.INSTANCE.pin(buildHudGoal(detailOption));
+		HudState.INSTANCE.pin(buildHudGoal(detailOption, pinnedTier));
 	}
 
 	/** Captures the inspected recipe as a live HUD goal. */
-	private HudGoal buildHudGoal(CraftOption option) {
+	private HudGoal buildHudGoal(CraftOption option, int pinnedTier) {
 		HudGoal goal = new HudGoal();
 		goal.skill = option.recipe.skill;
 		goal.recipeName = option.recipe.internalName;
@@ -1626,15 +1632,25 @@ public class WynncraftHelperScreen extends Screen {
 				goal.perCraftMaterials.merge(name, material.amount, Integer::sum);
 			}
 		}
-		if (option.ingredient != null && option.ingredient.name != null) {
+		Ingredient pinnedIngredient = breakdownSelectedTier > 0
+			? detailTierIngredients[breakdownSelectedTier]
+			: option.ingredient;
+		if (pinnedIngredient != null && pinnedIngredient.name != null) {
 			int slots = slotCount();
 			if (slots > 0) {
-				goal.perCraftIngredients.put(option.ingredient.name, slots);
+				// Tag the ingredient with its tier as well, so the HUD filters it together with
+				// the base materials of the same tier instead of dropping the whole section.
+				String ingredientKey = pinnedIngredient.name;
+				int ingredientTier = pinnedIngredient.tierIndex();
+				if (ingredientTier > 0) {
+					ingredientKey += " t" + ingredientTier;
+				}
+				goal.perCraftIngredients.put(ingredientKey, slots);
 			}
 		}
 		// Capture the pinned ingredient tier (T1/T2/T3) so the HUD tracks only that tier.
-		goal.tier = option.ingredient == null ? 0 : option.ingredient.tierIndex();
-		goal.pinnedIngredientName = option.ingredient == null ? null : option.ingredient.name;
+		goal.tier = pinnedTier;
+		goal.pinnedIngredientName = pinnedIngredient == null ? null : pinnedIngredient.name;
 		// When a tier is pinned, qualify the base material keys with that tier so the HUD
 		// renders a dedicated line per tier instead of aggregating all tiers together.
 		if (goal.tier > 0 && goal.pinnedIngredientName != null) {
