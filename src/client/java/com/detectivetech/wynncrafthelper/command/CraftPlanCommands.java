@@ -34,6 +34,7 @@ import java.util.Map;
  *   <li>{@code /craftplan debug} prints the held item's display name, internal ID, NBT and
  *       the profession tier read from its tooltip (via Wynntils).</li>
  *   <li>{@code /craftplan list} shows all links.</li>
+ *   <li>{@code /craftplan reload} forces the HUD to refresh immediately.</li>
  *   <li>{@code /craftplan measure start} / {@code measure on} / {@code time on} - starts measuring XP.</li>
  *   <li>{@code /craftplan measure stop} / {@code measure off} / {@code time off} - stops and saves average XP.</li>
  *   <li>{@code /craftplan measure status} - shows measurement progress plus estimated crafts/ingredients.</li>
@@ -58,6 +59,8 @@ public final class CraftPlanCommands {
 					.executes(CraftPlanCommands::debug))
 				.then(ClientCommandManager.literal("list")
 					.executes(CraftPlanCommands::list))
+				.then(ClientCommandManager.literal("reload")
+					.executes(CraftPlanCommands::reload))
 				.then(ClientCommandManager.literal("measure")
 					.then(ClientCommandManager.literal("start")
 						.executes(CraftPlanCommands::measureStart))
@@ -207,6 +210,13 @@ public final class CraftPlanCommands {
 			source.sendFeedback(Component.literal(line));
 			shown++;
 		}
+		return 1;
+	}
+
+	private static int reload(CommandContext<FabricClientCommandSource> context) {
+		FabricClientCommandSource source = context.getSource();
+		HudState.INSTANCE.forceRefresh(Minecraft.getInstance());
+		source.sendFeedback(Component.literal("HUD refreshed. Config is read automatically from disk on every access."));
 		return 1;
 	}
 
