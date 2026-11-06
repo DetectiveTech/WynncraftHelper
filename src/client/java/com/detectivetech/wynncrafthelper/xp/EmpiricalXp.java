@@ -2,7 +2,6 @@ package com.detectivetech.wynncrafthelper.xp;
 
 import com.detectivetech.wynncrafthelper.compat.WynntilsBridge;
 import com.detectivetech.wynncrafthelper.hud.HudGoal;
-import com.detectivetech.wynncrafthelper.hud.HudGoal;
 import com.detectivetech.wynncrafthelper.hud.HudState;
 import com.detectivetech.wynncrafthelper.util.MaterialNames;
 import com.google.gson.Gson;
@@ -35,7 +34,7 @@ public final class EmpiricalXp {
 	private static Map<String, Double> cache = new LinkedHashMap<>();
 	private static boolean loaded;
 
-	private static boolean measuring;
+	private static boolean isMeasuringEnabled;
 	private static double measureTotalXp;
 	private static int measureCount;
 	private static String measureSignature;
@@ -74,10 +73,25 @@ public final class EmpiricalXp {
 			double gained = WynntilsBridge.professionXpGain();
 			LOGGER.info("EmpiricalXp: onXpGain called, gained={}", gained);
 			if (gained <= 0) {
+				// While measuring, still record the craft so the measurement is not lost when
+				// the Wynntils event momentarily reports zero or is unavailable.
+				if (isMeasuringEnabled) {
+					measureTotalXp += 0.0;
+					measureCount++;
+					HudState.INSTANCE.scanInventoryOnly(client);
+					Map<String, Integer> current = HudState.INSTANCE.combinedSnapshot();
+					lastSnapshot = new HashMap<>(current);
+					pendingSnapshot = null;
+					LOGGER.info("EmpiricalXp: measure craft {} gained {} (zero)", measureCount, gained);
+					if (client.player != null) {
+						client.player.displayClientMessage(Component.literal(
+								"Measuring: craft " + measureCount + " gained " + (long) gained + " XP."), false);
+					}
+				}
 				return;
 			}
 
-			if (measuring) {
+			if (isMeasuringEnabled) {
 				measureTotalXp += gained;
 				measureCount++;
 				HudState.INSTANCE.scanInventoryOnly(client);
@@ -87,7 +101,7 @@ public final class EmpiricalXp {
 				LOGGER.info("EmpiricalXp: measure craft {} gained {}", measureCount, gained);
 				if (client.player != null) {
 					client.player.displayClientMessage(Component.literal(
-						"Measuring: craft " + measureCount + " gained " + (long) gained + " XP."), false);
+							"Measuring: craft " + measureCount + " gained " + (long) gained + " XP."), false);
 				}
 				return;
 			}
@@ -135,7 +149,7 @@ public final class EmpiricalXp {
 		if (goal == null) {
 			return false;
 		}
-		measuring = true;
+		isMeasuringEnabled = true;
 		measureTotalXp = 0;
 		measureCount = 0;
 		measureSignature = signatureFor(goal);
@@ -144,10 +158,10 @@ public final class EmpiricalXp {
 	}
 
 	public static boolean stopMeasure() {
-		if (!measuring) {
+		if (!isMeasuringEnabled) {
 			return false;
 		}
-		measuring = false;
+		isMeasuringEnabled = false;
 		if (measureCount > 0 && measureSignature != null) {
 			double avg = measureTotalXp / measureCount;
 			cache.put(measureSignature, avg);
@@ -163,7 +177,7 @@ public final class EmpiricalXp {
 	}
 
 	public static boolean isMeasuring() {
-		return measuring;
+		return isMeasuringEnabled;
 	}
 
 	public static int measureCount() {
