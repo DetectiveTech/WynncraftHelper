@@ -1,12 +1,12 @@
 package com.detectivetech.wynncrafthelper.xp;
 
 import com.detectivetech.wynncrafthelper.compat.WynntilsBridge;
+import com.detectivetech.wynncrafthelper.config.WynnPaths;
 import com.detectivetech.wynncrafthelper.hud.HudGoal;
 import com.detectivetech.wynncrafthelper.hud.HudState;
 import com.detectivetech.wynncrafthelper.util.MaterialNames;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import org.slf4j.Logger;
@@ -52,8 +52,7 @@ public final class EmpiricalXp {
 			return;
 		}
 		ensureLoaded();
-		HudState.INSTANCE.scanInventoryOnly(client);
-		Map<String, Integer> current = HudState.INSTANCE.combinedSnapshot();
+		Map<String, Integer> current = HudState.INSTANCE.inventorySnapshot(client);
 		if (lastSnapshot == null) {
 			lastSnapshot = new HashMap<>(current);
 			return;
@@ -73,13 +72,10 @@ public final class EmpiricalXp {
 			double gained = WynntilsBridge.professionXpGain();
 			LOGGER.info("EmpiricalXp: onXpGain called, gained={}", gained);
 			if (gained <= 0) {
-				// While measuring, still record the craft so the measurement is not lost when
-				// the Wynntils event momentarily reports zero or is unavailable.
 				if (isMeasuringEnabled) {
 					measureTotalXp += 0.0;
 					measureCount++;
-					HudState.INSTANCE.scanInventoryOnly(client);
-					Map<String, Integer> current = HudState.INSTANCE.combinedSnapshot();
+					Map<String, Integer> current = HudState.INSTANCE.inventorySnapshot(client);
 					lastSnapshot = new HashMap<>(current);
 					pendingSnapshot = null;
 					LOGGER.info("EmpiricalXp: measure craft {} gained {} (zero)", measureCount, gained);
@@ -94,8 +90,7 @@ public final class EmpiricalXp {
 			if (isMeasuringEnabled) {
 				measureTotalXp += gained;
 				measureCount++;
-				HudState.INSTANCE.scanInventoryOnly(client);
-				Map<String, Integer> current = HudState.INSTANCE.combinedSnapshot();
+				Map<String, Integer> current = HudState.INSTANCE.inventorySnapshot(client);
 				lastSnapshot = new HashMap<>(current);
 				pendingSnapshot = null;
 				LOGGER.info("EmpiricalXp: measure craft {} gained {}", measureCount, gained);
@@ -106,8 +101,7 @@ public final class EmpiricalXp {
 				return;
 			}
 
-			HudState.INSTANCE.scanInventoryOnly(client);
-			Map<String, Integer> current = HudState.INSTANCE.combinedSnapshot();
+			Map<String, Integer> current = HudState.INSTANCE.inventorySnapshot(client);
 			Map<String, Integer> before = pendingSnapshot != null ? pendingSnapshot : lastSnapshot;
 			pendingSnapshot = null;
 			lastSnapshot = new HashMap<>(current);
@@ -266,7 +260,7 @@ public final class EmpiricalXp {
 		}
 		loaded = true;
 		try {
-			Path path = FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
+			Path path = WynnPaths.resolve(FILE_NAME);
 			if (Files.exists(path)) {
 				Map<?, ?> loadedMap = GSON.fromJson(Files.readString(path, StandardCharsets.UTF_8), Map.class);
 				if (loadedMap != null) {
@@ -284,7 +278,7 @@ public final class EmpiricalXp {
 
 	private static void save() {
 		try {
-			Path path = FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
+			Path path = WynnPaths.resolve(FILE_NAME);
 			Files.writeString(path, GSON.toJson(cache), StandardCharsets.UTF_8);
 		} catch (Exception ignored) {
 			// saving is best-effort

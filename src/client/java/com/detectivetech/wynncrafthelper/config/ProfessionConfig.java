@@ -4,7 +4,6 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.detectivetech.wynncrafthelper.hud.HudGoal;
 import com.detectivetech.wynncrafthelper.util.MaterialNames;
-import net.fabricmc.loader.api.FabricLoader;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -27,6 +26,13 @@ public final class ProfessionConfig {
 		"cooking",
 		"scribing",
 		"alchemism"
+	);
+
+	private static final List<String> GATHERING = List.of(
+		"mining",
+		"fishing",
+		"farming",
+		"woodcutting"
 	);
 
 	private static final Map<String, String> DISPLAY_NAMES = new LinkedHashMap<>();
@@ -61,6 +67,14 @@ public final class ProfessionConfig {
 			data.selected = selected;
 		}
 		return selected;
+	}
+
+	/**
+	 * Returns true if the given skill is a gathering profession (Mining, Fishing, Farming, Woodcutting).
+	 * HUD updates should be skipped for gathering professions.
+	 */
+	public static boolean isGatheringProfession(String skill) {
+		return GATHERING.contains(skill);
 	}
 
 	public static void cycleSelected(int delta) {
@@ -357,7 +371,7 @@ public final class ProfessionConfig {
 	}
 
 	private static Path path() {
-		return FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
+		return WynnPaths.resolve(FILE_NAME);
 	}
 
 	private static int clamp(int value, int min, int max) {

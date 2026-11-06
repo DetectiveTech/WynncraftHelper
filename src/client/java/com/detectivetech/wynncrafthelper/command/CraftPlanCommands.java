@@ -1,7 +1,12 @@
 package com.detectivetech.wynncrafthelper.command;
 
+import com.detectivetech.wynncrafthelper.api.WynncraftEvents;
+import com.detectivetech.wynncrafthelper.compat.WynntilsBridge;
 import com.detectivetech.wynncrafthelper.config.ManualItem;
 import com.detectivetech.wynncrafthelper.config.ProfessionConfig;
+import com.detectivetech.wynncrafthelper.config.ProfessionXp;
+import com.detectivetech.wynncrafthelper.hud.HudGoal;
+import com.detectivetech.wynncrafthelper.hud.HudState;
 import com.detectivetech.wynncrafthelper.util.MaterialNames;
 import com.detectivetech.wynncrafthelper.xp.EmpiricalXp;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -26,8 +31,12 @@ import java.util.Map;
  *       material. Optional {@code ratio} means "this many held items count as one required
  *       unit" (3 for three raw items per refined unit).</li>
  *   <li>{@code /craftplan unregister <material>} removes the link.</li>
+ *   <li>{@code /craftplan debug} prints the held item's display name, internal ID, NBT and
+ *       the profession tier read from its tooltip (via Wynntils).</li>
  *   <li>{@code /craftplan list} shows all links.</li>
- *   <li>{@code /craftplan debug} prints the held item's display name, internal id and NBT.</li>
+ *   <li>{@code /craftplan measure start} / {@code measure on} / {@code time on} - starts measuring XP.</li>
+ *   <li>{@code /craftplan measure stop} / {@code measure off} / {@code time off} - stops and saves average XP.</li>
+ *   <li>{@code /craftplan measure status} - shows measurement progress plus estimated crafts/ingredients.</li>
  * </ul>
  */
 public final class CraftPlanCommands {
@@ -55,7 +64,11 @@ public final class CraftPlanCommands {
 					.then(ClientCommandManager.literal("stop")
 						.executes(CraftPlanCommands::measureStop))
 					.then(ClientCommandManager.literal("status")
-						.executes(CraftPlanCommands::measureStatus)))
+						.executes(CraftPlanCommands::measureStatus))
+					.then(ClientCommandManager.literal("on")
+						.executes(CraftPlanCommands::measureStart))
+					.then(ClientCommandManager.literal("off")
+						.executes(CraftPlanCommands::measureStop)))
 				.then(ClientCommandManager.literal("time")
 					.then(ClientCommandManager.literal("on")
 						.executes(CraftPlanCommands::measureStart))
@@ -73,36 +86,45 @@ public final class CraftPlanCommands {
 		}
 		String input = unquote(StringArgumentType.getString(context, "args"));
 		if (input.isEmpty()) {
-			source.sendError(Component.literal("Usage: /craftplan register <material> [ratio]"));
+			source.sendError(Component.literal("Usage: /craftplan register <material> [tier]"));
 			return 0;
 		}
-		// A trailing number is the raw:refined ratio; everything before it is the name,
-		// so names with spaces work without quotes.
-		int ratio = 1;
+		// A trailing tier number (1, 2 or 3) separates material tiers that share one
+		// display name but have different tooltips (e.g. "Dernic Meat 1", "Dernic Meat 2").
+		// Everything before the trailing number is the material name, so names with spaces
+		// work without quotes. The raw:refined ratio is always 1:1 in modern Wynncraft.
+		int tier = 0;
 		String material = input;
 		int split = input.lastIndexOf(' ');
 		if (split > 0) {
 			String tail = input.substring(split + 1).trim();
-			if (tail.matches("\\d{1,6}")) {
-				ratio = Math.max(1, Integer.parseInt(tail));
+			if (tail.matches("^[123]$")) {
+				tier = Integer.parseInt(tail);
 				material = input.substring(0, split).trim();
 			}
 		}
 		if (material.isEmpty()) {
-			source.sendError(Component.literal("Usage: /craftplan register <material> [ratio]"));
+			source.sendError(Component.literal("Usage: /craftplan register <material> [tier]"));
 			return 0;
 		}
+
+		String tierKey = tier > 0 ? " t" + tier : "";
 
 		ManualItem item = new ManualItem();
 		item.displayName = MaterialNames.canonical(stack.getHoverName().getString());
 		item.itemId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
 		item.components = truncate(String.valueOf(stack.getComponentsPatch()), 300);
-		item.rawPerUnit = ratio;
-		ProfessionConfig.setManualItem(material, item);
+		item.rawPerUnit = 1; // modern Wynncraft is 1:1; tier is separate from ratio
+		// Store with tier key suffix so each tier gets its own HUD row.
+		String canonicalMat = MaterialNames.canonical(material);
+		String fullKey = canonicalMat + tierKey;
+		ProfessionConfig.setManualItem(fullKey, item);
 
-		String linked = MaterialNames.canonical(material);
-		String message = "Linked \"" + linked + "\" to held item \"" + item.displayName + "\" (" + item.itemId + ")"
-			+ (ratio > 1 ? " - " + ratio + " held items = 1 required unit" : "") + ".";
+		String linked = MaterialNames.canonical(material) + tierKey;
+		String message = "Linked \"" + linked + "\" to held item \"" + item.displayName + "\" (" + item.itemId + ")";
+		if (tier > 0) {
+			message = message + " [Tier " + tier + "]";
+		}
 		source.sendFeedback(Component.literal(message));
 		LOGGER.info("WynncraftHelper: {}", message);
 		return 1;
@@ -115,11 +137,19 @@ public final class CraftPlanCommands {
 			source.sendError(Component.literal("Usage: /craftplan unregister <material>"));
 			return 0;
 		}
-		if (ProfessionConfig.removeManualItem(material)) {
-			source.sendFeedback(Component.literal("Removed manual link for \"" + material + "\"."));
+		// Support unregistering with tier: "Dernic Meat 1", "Dernic Meat 2", "Dernic Meat 3"
+		String tierSuffix = "";
+		if (material.matches(".* t[123]$")) {
+			String[] parts = material.split(" t");
+			tierSuffix = " t" + parts[parts.length - 1];
+			material = parts[0];
+		}
+		String fullKey = material + tierSuffix;
+		if (ProfessionConfig.removeManualItem(fullKey)) {
+			source.sendFeedback(Component.literal("Removed manual link for \"" + fullKey + "\"."));
 			return 1;
 		}
-		source.sendError(Component.literal("No manual link registered for \"" + material + "\"."));
+		source.sendError(Component.literal("No manual link registered for \"" + fullKey + "\"."));
 		return 0;
 	}
 
@@ -139,6 +169,7 @@ public final class CraftPlanCommands {
 
 		source.sendFeedback(Component.literal("Held item: " + display));
 		source.sendFeedback(Component.literal("Internal ID: " + itemId));
+		source.sendFeedback(Component.literal("Wynntils tier: T" + WynntilsBridge.itemTier(stack)));
 		source.sendFeedback(Component.literal("Canonical name: " + canonical));
 		source.sendFeedback(Component.literal("Normalized match key: " + normalized));
 		source.sendFeedback(Component.literal("NBT/components: " + components));
@@ -179,6 +210,79 @@ public final class CraftPlanCommands {
 		return 1;
 	}
 
+	/**
+	 * Builds a human-readable estimate of remaining crafts and required ingredients for the
+	 * pinned goal, using the saved empirical average XP per craft when available.
+	 */
+	private static String estimateRemaining() {
+		HudGoal goal = HudState.INSTANCE.goal();
+		if (goal == null) {
+			return "No goal pinned. Pin a recipe first, then measure.";
+		}
+
+		String skill = goal.skill;
+		int currentLevel = WynntilsBridge.professionLevel(skill);
+		if (currentLevel <= 0) {
+			currentLevel = ProfessionConfig.level(skill);
+		}
+		double progress = WynntilsBridge.professionProgressPercent(skill);
+		if (progress < 0) {
+			progress = ProfessionConfig.progress(skill);
+		}
+
+		int target = Math.max(currentLevel, goal.targetLevel);
+		long remainingXp = 0L;
+		for (int lvl = currentLevel; lvl < target && lvl < ProfessionXp.MAX_LEVEL; lvl++) {
+			long needed = ProfessionXp.xpToNext(lvl);
+			remainingXp += lvl == currentLevel
+				? Math.round(needed * (100.0 - progress) / 100.0)
+				: needed;
+		}
+
+		String signature = EmpiricalXp.signatureFor(goal);
+		Double empirical = signature == null ? null : EmpiricalXp.lookup(signature);
+		boolean worldBonus = ProfessionConfig.doubleXpWeekend()
+			|| WynncraftEvents.doubleXpActive();
+		Boolean xpBomb = WynntilsBridge.professionXpBombActive();
+		worldBonus = worldBonus || Boolean.TRUE.equals(xpBomb);
+		double world = worldBonus ? 2.0 : 1.0;
+
+		double xpPerCraft;
+		if (empirical != null && empirical > 0) {
+			xpPerCraft = empirical;
+		} else {
+			double ingredient = goal.ingredientMultiplier > 0 ? goal.ingredientMultiplier : 1.0;
+			xpPerCraft = Math.max(0, goal.baseXp) * world * ingredient;
+		}
+
+		long crafts = xpPerCraft <= 0 ? 0 : (long) Math.ceil((double) remainingXp / xpPerCraft);
+
+		StringBuilder sb = new StringBuilder();
+		sb.append("Estimate: ")
+		  .append(crafts)
+		  .append(" crafts to reach level ")
+		  .append(target)
+		  .append(" (").append(remainingXp).append(" XP remaining, ")
+		  .append((long) xpPerCraft).append(" XP/craft, source=")
+		  .append(empirical != null ? "measured" : "formula").append(")");
+
+		if (goal.perCraftMaterials != null && !goal.perCraftMaterials.isEmpty()) {
+			sb.append("\nMaterials needed:");
+			for (Map.Entry<String, Integer> entry : goal.perCraftMaterials.entrySet()) {
+				int amount = entry.getValue() == null ? 0 : entry.getValue();
+				sb.append("\n  ").append(entry.getKey()).append(": ").append((long) amount * crafts);
+			}
+		}
+		if (goal.perCraftIngredients != null && !goal.perCraftIngredients.isEmpty()) {
+			sb.append("\nIngredients needed:");
+			for (Map.Entry<String, Integer> entry : goal.perCraftIngredients.entrySet()) {
+				int amount = entry.getValue() == null ? 0 : entry.getValue();
+				sb.append("\n  ").append(entry.getKey()).append(": ").append((long) amount * crafts);
+			}
+		}
+		return sb.toString();
+	}
+
 	private static int measureStart(CommandContext<FabricClientCommandSource> context) {
 		FabricClientCommandSource source = context.getSource();
 		if (!EmpiricalXp.startMeasure()) {
@@ -208,6 +312,7 @@ public final class CraftPlanCommands {
 		if (result != null) {
 			source.sendFeedback(Component.literal(result));
 		}
+		source.sendFeedback(Component.literal(estimateRemaining()));
 		return 1;
 	}
 
@@ -219,6 +324,7 @@ public final class CraftPlanCommands {
 		} else {
 			String result = EmpiricalXp.lastMeasureResult();
 			source.sendFeedback(Component.literal(result == null ? "Not measuring." : result));
+			source.sendFeedback(Component.literal(estimateRemaining()));
 		}
 		return 1;
 	}

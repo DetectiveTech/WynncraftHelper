@@ -179,6 +179,41 @@ public final class HudState {
 		return result;
 	}
 
+	/**
+	 * Tier-less inventory snapshot used by the XP measurement. It runs every client tick, so
+	 * it deliberately avoids reading item tooltips; XP deltas only need name + count.
+	 */
+	public Map<String, Integer> inventorySnapshot(Minecraft client) {
+		Map<String, Integer> result = new HashMap<>();
+		if (client == null || client.player == null) {
+			return result;
+		}
+		Inventory inventory = client.player.getInventory();
+		ItemStack offhand = client.player.getOffhandItem();
+		boolean offhandCounted = false;
+		for (ItemStack stack : inventory.getNonEquipmentItems()) {
+			if (stack == offhand) {
+				offhandCounted = true;
+			}
+			mergeSnapshot(result, stack);
+		}
+		if (!offhandCounted) {
+			mergeSnapshot(result, offhand);
+		}
+		return result;
+	}
+
+	private static void mergeSnapshot(Map<String, Integer> counts, ItemStack stack) {
+		if (stack == null || stack.isEmpty()) {
+			return;
+		}
+		String normalized = MaterialNames.normalize(stack.getHoverName().getString());
+		if (normalized.isEmpty()) {
+			return;
+		}
+		counts.merge(normalized, stack.getCount(), Integer::sum);
+	}
+
 	public void scanInventoryOnly(Minecraft client) {
 		if (client == null || client.player == null) {
 			return;
@@ -271,6 +306,13 @@ public final class HudState {
 		double xpPerCraft = xpPerCraft();
 		long crafts = xpPerCraft <= 0 ? 0 : (long) Math.ceil(remainingXp / xpPerCraft);
 		if (remainingXp <= 0) {
+			crafts = 0;
+		}
+		// Sanity guard: craft counts beyond a plausible ceiling indicate a bad measurement or
+		// world-multiplier state; keep the HUD from rendering absurd numbers.
+		if (crafts > 100000L) {
+			LOGGER.warn("WynncraftHelper: absurd craft count {} (remainingXp={}, xpPerCraft={}) for {}",
+				crafts, remainingXp, xpPerCraft, goal.skill);
 			crafts = 0;
 		}
 		long now = System.currentTimeMillis();
@@ -419,16 +461,16 @@ public final class HudState {
 			complete ? C_GREEN : C_MUTED, false);
 	}
 
-	/** Filters rows to only the rows for the given tier (T1/T2/T3), e.g. {@code "dernic meat t1"}. */
+	/** Filters rows to only the rows for the given tier (T1/T2/T3), e.g. {@code "Dernic Meat t1"}. */
 	private List<Row> filterRowsByTier(List<Row> rows, int tier) {
 		List<Row> result = new ArrayList<>();
 		if (rows == null || rows.isEmpty() || tier <= 0) {
 			return rows;
 		}
 		for (Row row : rows) {
-			String name = row.name == null ? "" : row.name.toLowerCase(Locale.ROOT);
+			String key = row.key == null ? "" : row.key.toLowerCase(Locale.ROOT);
 			String tierSuffix = " t" + tier;
-			if (name.endsWith(tierSuffix)) {
+			if (key.endsWith(tierSuffix)) {
 				result.add(row);
 			}
 		}
@@ -459,7 +501,7 @@ public final class HudState {
 		}
 		for (Map.Entry<String, Integer> entry : merged.entrySet()) {
 			long required = (long) Math.ceil(entry.getValue() * (double) crafts * materialMultiplier);
-			rows.add(new Row(entry.getKey(), currentCount(entry.getKey()), required));
+			rows.add(new Row(entry.getKey(), displayName(entry.getKey()), currentCount(entry.getKey()), required));
 		}
 		return rows;
 	}
@@ -576,55 +618,87 @@ public final class HudState {
 		if (canonical.isEmpty()) {
 			return 0;
 		}
-		// A player-registered link always wins over the automatic name match.
-		// Check for tier-differentiated manual links first (e.g., "dernic meat t1", "dernic meat t2")
-		ManualItem manual = ProfessionConfig.manualItem(canonical);
+		// Materials are stored with a tier suffix ("Dernic Meat t2") so each tier gets its
+		// own line. Split it off before comparing against inventory item names.
+		int requiredTier = tierSuffix(canonical);
+		String baseName = requiredTier > 0 ? stripTierSuffix(canonical) : canonical;
+
+		// A player-registered link always wins over the automatic name match. A tier-specific
+		// link is preferred over a generic one for the same base name.
+		ManualItem manual = requiredTier > 0
+			? ProfessionConfig.manualItem(baseName + " t" + requiredTier)
+			: null;
 		if (manual == null) {
-			// Try with tier suffixes: t1, t2, t3
-			for (int tier = 1; tier <= 3; tier++) {
-				String tierKey = canonical + " t" + tier;
-				manual = ProfessionConfig.manualItem(tierKey);
-				if (manual != null) {
-					break;
-				}
+			manual = ProfessionConfig.manualItem(baseName);
+		}
+
+		int total = 0;
+		for (ItemCount item : inventoryCounts) {
+			if (matches(manual, baseName, requiredTier, item)) {
+				total += item.count;
 			}
 		}
-		int total = 0;
-		if (manual != null) {
-			for (ItemCount item : inventoryCounts) {
-				if (manual.matches(item.normalizedName)) {
-					total += item.count;
-				}
+		for (ItemCount item : pouchCounts) {
+			if (matches(manual, baseName, requiredTier, item)) {
+				total += item.count;
 			}
-			for (ItemCount item : pouchCounts) {
-				if (manual.matches(item.normalizedName)) {
-					total += item.count;
-				}
-			}
-			if (manual.ratio() > 1) {
-				total /= manual.ratio();
-			}
-		} else {
-			// No manual link found; fall through to automatic name matching
-			for (ItemCount item : inventoryCounts) {
-				if (matches(manual, canonical, item)) {
-					total += item.count;
-				}
-			}
-			for (ItemCount item : pouchCounts) {
-				if (matches(manual, canonical, item)) {
-					total += item.count;
-				}
-			}
+		}
+		if (manual != null && manual.ratio() > 1) {
+			total /= manual.ratio();
 		}
 		return total;
 	}
 
-	private static boolean matches(ManualItem manual, String canonical, ItemCount item) {
+	private static boolean matches(ManualItem manual, String baseName, int requiredTier, ItemCount item) {
+		if (!tierMatches(requiredTier, item.tier)) {
+			return false;
+		}
 		if (manual != null) {
 			return manual.matches(item.normalizedName);
 		}
-		return MaterialNames.matches(canonical, item.normalizedName);
+		return MaterialNames.matches(baseName, item.normalizedName);
+	}
+
+	/**
+	 * True when an item of {@code itemTier} belongs on the row for {@code requiredTier}.
+	 * When no tier is required ({@code requiredTier <= 0}) every item matches. When a
+	 * specific tier is required, only items whose tooltip tier actually matches count;
+	 * items with an unknown tier ({@code 0}) are excluded so T1/T2/T3 aren't merged
+	 * together when Wynntils can't read the tooltip.
+	 */
+	private static boolean tierMatches(int requiredTier, int itemTier) {
+		if (requiredTier <= 0) {
+			return true; // no tier restriction: count every tier together
+		}
+		if (itemTier <= 0) {
+			return false; // unknown tier can't satisfy a specific tier row
+		}
+		return requiredTier == itemTier;
+	}
+
+	/** Reads a trailing {@code " t1"}/{@code " t2"}/{@code " t3"} tier tag, or 0 when absent. */
+	private static int tierSuffix(String name) {
+		if (name == null) {
+			return 0;
+		}
+		String lower = name.toLowerCase(Locale.ROOT);
+		for (int tier = 1; tier <= 3; tier++) {
+			if (lower.endsWith(" t" + tier)) {
+				return tier;
+			}
+		}
+		return 0;
+	}
+
+	private static String stripTierSuffix(String name) {
+		int tier = tierSuffix(name);
+		return tier <= 0 ? name : name.substring(0, name.length() - 3).trim();
+	}
+
+	/** HUD label: {@code "Dernic Meat t2"} becomes {@code "Dernic Meat · T2"}. */
+	private static String displayName(String key) {
+		int tier = tierSuffix(key);
+		return tier <= 0 ? key : stripTierSuffix(key) + " · T" + tier;
 	}
 
 	private static void addStack(List<ItemCount> counts, ItemStack stack) {
@@ -637,13 +711,17 @@ public final class HudState {
 			return;
 		}
 		String itemId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+		// Materials and ingredients keep the same display name across tiers, so the tier is
+		// read from the item tooltip (via Wynntils) and kept as part of the count's identity.
+		int tier = WynntilsBridge.itemTier(stack);
 		for (ItemCount existing : counts) {
-			if (existing.normalizedName.equals(normalized) && existing.itemId.equals(itemId)) {
+			if (existing.normalizedName.equals(normalized) && existing.itemId.equals(itemId)
+				&& existing.tier == tier) {
 				existing.count += stack.getCount();
 				return;
 			}
 		}
-		counts.add(new ItemCount(normalized, itemId, stack.getCount()));
+		counts.add(new ItemCount(normalized, itemId, tier, stack.getCount()));
 	}
 
 	// ---------------------------------------------------------------- dragging
@@ -801,21 +879,25 @@ public final class HudState {
 	private static final class ItemCount {
 		private final String normalizedName;
 		private final String itemId;
+		private final int tier;
 		private int count;
 
-		private ItemCount(String normalizedName, String itemId, int count) {
+		private ItemCount(String normalizedName, String itemId, int tier, int count) {
 			this.normalizedName = normalizedName;
 			this.itemId = itemId;
+			this.tier = tier;
 			this.count = count;
 		}
 	}
 
 	private static final class Row {
+		private final String key;
 		private final String name;
 		private final int current;
 		private final long required;
 
-		private Row(String name, int current, long required) {
+		private Row(String key, String name, int current, long required) {
+			this.key = key;
 			this.name = name;
 			this.current = current;
 			this.required = required;

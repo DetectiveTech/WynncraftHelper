@@ -4,8 +4,8 @@ import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.detectivetech.wynncrafthelper.config.WynnPaths;
 import com.detectivetech.wynncrafthelper.util.MaterialNames;
-import net.fabricmc.loader.api.FabricLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -101,7 +101,7 @@ public class WynncraftApiClient {
 	private List<String> loadTokens() {
 		List<String> result = new ArrayList<>();
 		try {
-			Path path = FabricLoader.getInstance().getConfigDir().resolve("wynncrafthelper.json");
+			Path path = WynnPaths.resolve("wynncrafthelper.json");
 			if (!Files.exists(path)) {
 				return result;
 			}
@@ -476,7 +476,7 @@ public class WynncraftApiClient {
 	}
 
 	private Path ingredientCachePath() {
-		return FabricLoader.getInstance().getConfigDir().resolve(INGREDIENT_CACHE_FILE);
+		return WynnPaths.resolve(INGREDIENT_CACHE_FILE);
 	}
 
 	private List<Ingredient> loadIngredientCache() {
@@ -594,7 +594,7 @@ public class WynncraftApiClient {
 	}
 
 	private Path recipeCachePath() {
-		return FabricLoader.getInstance().getConfigDir().resolve(RECIPE_CACHE_FILE);
+		return WynnPaths.resolve(RECIPE_CACHE_FILE);
 	}
 
 	private List<Recipe> loadRecipeCache() {
