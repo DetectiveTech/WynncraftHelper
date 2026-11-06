@@ -1,6 +1,8 @@
 package com.detectivetech.wynncrafthelper.xp;
 
+import com.detectivetech.wynncrafthelper.api.WynncraftEvents;
 import com.detectivetech.wynncrafthelper.compat.WynntilsBridge;
+import com.detectivetech.wynncrafthelper.config.ProfessionConfig;
 import com.detectivetech.wynncrafthelper.config.WynnPaths;
 import com.detectivetech.wynncrafthelper.hud.HudGoal;
 import com.detectivetech.wynncrafthelper.hud.HudState;
@@ -41,6 +43,7 @@ public final class EmpiricalXp {
 	private static String lastMeasureResult;
 	private static Map<String, Integer> lastSnapshot;
 	private static Map<String, Integer> pendingSnapshot;
+	private static boolean craftPending; // set by tick() when inventory changes; consumed by onXpGain() or stopMeasure()
 
 	private EmpiricalXp() {
 	}
@@ -60,7 +63,45 @@ public final class EmpiricalXp {
 		if (!current.equals(lastSnapshot)) {
 			pendingSnapshot = new HashMap<>(lastSnapshot);
 			lastSnapshot = new HashMap<>(current);
+			// Measurement fallback: mark that a craft was detected via inventory change.
+			// onXpGain() consumes this flag and records the craft with Wynntils XP.
+			// If Wynntils never fires, stopMeasure() records it with estimated XP.
+			if (isMeasuringEnabled) {
+				craftPending = true;
+			}
 		}
+	}
+
+	/**
+	 * Fallback called only from {@link #stopMeasure()} when Wynntils never fired an XP
+	 * event for a craft that tick() detected via inventory change.
+	 */
+	private static void recordPendingCraft() {
+		if (!isMeasuringEnabled || !craftPending) {
+			return;
+		}
+		craftPending = false;
+		pendingSnapshot = null;
+
+		measureCount++;
+		double estimatedXp = estimateBaseXp();
+		measureTotalXp += estimatedXp;
+
+		LOGGER.info("EmpiricalXp: measure craft {} gained {} (inventory fallback, no wynntils xp)", measureCount, (long) estimatedXp);
+	}
+
+	private static double estimateBaseXp() {
+		HudGoal goal = HudState.INSTANCE.goal();
+		if (goal != null && goal.baseXp > 0) {
+			boolean worldBonus = ProfessionConfig.doubleXpWeekend()
+				|| WynncraftEvents.doubleXpActive();
+			Boolean xpBomb = WynntilsBridge.professionXpBombActive();
+			worldBonus = worldBonus || Boolean.TRUE.equals(xpBomb);
+			double world = worldBonus ? 2.0 : 1.0;
+			double ingredient = goal.ingredientMultiplier > 0 ? goal.ingredientMultiplier : 1.0;
+			return Math.max(0, goal.baseXp) * world * ingredient;
+		}
+		return 0.0;
 	}
 
 	public static void onXpGain(Minecraft client) {
@@ -71,14 +112,26 @@ public final class EmpiricalXp {
 			ensureLoaded();
 			double gained = WynntilsBridge.professionXpGain();
 			LOGGER.info("EmpiricalXp: onXpGain called, gained={}", gained);
-			if (gained <= 0) {
-				if (isMeasuringEnabled) {
-					measureTotalXp += 0.0;
+
+			if (isMeasuringEnabled) {
+				if (craftPending) {
+					// tick() already detected this craft via inventory change.
+					// Use Wynntils' accurate XP value instead of the estimate.
+					measureTotalXp += gained;
+					craftPending = false;
+					pendingSnapshot = null;
+					LOGGER.info("EmpiricalXp: measure craft {} gained {} (wynntils xp)", measureCount, gained);
+					if (client.player != null) {
+						client.player.displayClientMessage(Component.literal(
+								"Measuring: craft " + measureCount + " gained " + (long) gained + " XP."), false);
+					}
+				} else {
+					measureTotalXp += gained;
 					measureCount++;
 					Map<String, Integer> current = HudState.INSTANCE.inventorySnapshot(client);
 					lastSnapshot = new HashMap<>(current);
 					pendingSnapshot = null;
-					LOGGER.info("EmpiricalXp: measure craft {} gained {} (zero)", measureCount, gained);
+					LOGGER.info("EmpiricalXp: measure craft {} gained {}", measureCount, gained);
 					if (client.player != null) {
 						client.player.displayClientMessage(Component.literal(
 								"Measuring: craft " + measureCount + " gained " + (long) gained + " XP."), false);
@@ -87,17 +140,7 @@ public final class EmpiricalXp {
 				return;
 			}
 
-			if (isMeasuringEnabled) {
-				measureTotalXp += gained;
-				measureCount++;
-				Map<String, Integer> current = HudState.INSTANCE.inventorySnapshot(client);
-				lastSnapshot = new HashMap<>(current);
-				pendingSnapshot = null;
-				LOGGER.info("EmpiricalXp: measure craft {} gained {}", measureCount, gained);
-				if (client.player != null) {
-					client.player.displayClientMessage(Component.literal(
-							"Measuring: craft " + measureCount + " gained " + (long) gained + " XP."), false);
-				}
+			if (gained <= 0) {
 				return;
 			}
 
@@ -148,6 +191,7 @@ public final class EmpiricalXp {
 		measureCount = 0;
 		measureSignature = signatureFor(goal);
 		lastMeasureResult = null;
+		craftPending = false;
 		return true;
 	}
 
@@ -156,6 +200,8 @@ public final class EmpiricalXp {
 			return false;
 		}
 		isMeasuringEnabled = false;
+		// Record any craft that tick() detected but Wynntils never reported XP for.
+		recordPendingCraft();
 		if (measureCount > 0 && measureSignature != null) {
 			double avg = measureTotalXp / measureCount;
 			cache.put(measureSignature, avg);
@@ -167,6 +213,7 @@ public final class EmpiricalXp {
 		measureTotalXp = 0;
 		measureCount = 0;
 		measureSignature = null;
+		craftPending = false;
 		return true;
 	}
 
