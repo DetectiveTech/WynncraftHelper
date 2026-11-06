@@ -624,10 +624,22 @@ public final class HudState {
 		String baseName = requiredTier > 0 ? stripTierSuffix(canonical) : canonical;
 
 		// A player-registered link always wins over the automatic name match. A tier-specific
-		// link is preferred over a generic one for the same base name.
+		// link is preferred over a generic one for the same base name. When the goal key has
+		// no tier suffix but the player registered a tier-specific link (e.g. "Dernic Meat t2"),
+		// use that tier so T1/T2/T3 aren't merged together.
 		ManualItem manual = requiredTier > 0
 			? ProfessionConfig.manualItem(baseName + " t" + requiredTier)
 			: null;
+		if (manual == null && requiredTier == 0) {
+			for (int t = 1; t <= 3; t++) {
+				ManualItem tierManual = ProfessionConfig.manualItem(baseName + " t" + t);
+				if (tierManual != null) {
+					manual = tierManual;
+					requiredTier = t;
+					break;
+				}
+			}
+		}
 		if (manual == null) {
 			manual = ProfessionConfig.manualItem(baseName);
 		}
