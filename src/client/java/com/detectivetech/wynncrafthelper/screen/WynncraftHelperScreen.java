@@ -1625,7 +1625,6 @@ public class WynncraftHelperScreen extends Screen {
 		goal.recipeLevel = option.recipe.level == null ? professionLevel : option.recipe.level.minimum;
 		goal.targetLevel = Math.max(professionLevel + 1, targetLevel);
 		goal.baseXp = option.recipe.xp;
-		goal.ingredientMultiplier = option.multiplier > 0 ? option.multiplier : 1.0;
 		if (option.recipe.materials != null) {
 			for (RecipeMaterial material : option.recipe.materials) {
 				String name = MaterialNames.canonical(material.item);
@@ -1635,6 +1634,14 @@ public class WynncraftHelperScreen extends Screen {
 		Ingredient pinnedIngredient = breakdownSelectedTier > 0
 			? detailTierIngredients[breakdownSelectedTier]
 			: option.ingredient;
+		// Calculate ingredient multiplier from the pinned tier's ingredient, not from
+		// option.multiplier (which is stale from before the tier was selected). Higher
+		// tier ingredients give more XP bonus, so T1/T2/T3 need different craft counts.
+		if (pinnedIngredient != null && slotCount() > 0) {
+			goal.ingredientMultiplier = ingredientMultiplier(pinnedIngredient, goal.recipeLevel);
+		} else {
+			goal.ingredientMultiplier = option.multiplier > 0 ? option.multiplier : 1.0;
+		}
 		if (pinnedIngredient != null && pinnedIngredient.name != null) {
 			int slots = slotCount();
 			if (slots > 0) {
