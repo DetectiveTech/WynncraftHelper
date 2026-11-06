@@ -23,6 +23,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Renders and manages the pinned crafting HUD. It is independent of the planner screen so
@@ -30,6 +32,8 @@ import java.util.Map;
  */
 public final class HudState {
 	public static final HudState INSTANCE = new HudState();
+
+	private static final Logger LOGGER = LoggerFactory.getLogger("WynncraftHelper.HudState");
 
 	private static final int width = 300;
 	private static final int MIN_W = 180;
@@ -101,6 +105,16 @@ public final class HudState {
 		return goal;
 	}
 
+	/** The pinned ingredient tier (T1=1, T2=2, T3=3) for the current goal, 0 when unset. */
+	public int pinnedTier() {
+		return goal == null ? 0 : goal.tier;
+	}
+
+	/** The pinned ingredient name for the current goal, or null when unset. */
+	public String pinnedIngredientName() {
+		return goal == null ? null : goal.pinnedIngredientName;
+	}
+
 	public String pinnedSkill() {
 		return goal == null ? null : goal.skill;
 	}
@@ -108,6 +122,17 @@ public final class HudState {
 	public boolean isPinned(String recipeName) {
 		return goal != null && recipeName != null && goal.recipeName != null
 			&& goal.recipeName.equalsIgnoreCase(recipeName);
+	}
+
+	/** True when the recipe is pinned for the given tier (T1=1, T2=2, T3=3). */
+	public boolean isPinned(String recipeName, int tier) {
+		if (goal == null || recipeName == null || goal.recipeName == null) {
+			return false;
+		}
+		if (!goal.recipeName.equalsIgnoreCase(recipeName)) {
+			return false;
+		}
+		return goal.tier == tier;
 	}
 
 	public void pin(HudGoal newGoal) {
@@ -249,7 +274,7 @@ public final class HudState {
 			crafts = 0;
 		}
 		long now = System.currentTimeMillis();
-		if (lastRenderAt == 0 || now - lastRenderAt > 2000L) {
+		if (lastRenderAt == 0 || now - lastRenderAt > 500L) {
 			lastCrafts = (int) Math.min(Integer.MAX_VALUE, crafts);
 		} else if (lastCrafts > 0 && lastProgress != progress && crafts < lastCrafts - 1) {
 			crafts = Math.max(0, lastCrafts - 1);
@@ -266,6 +291,11 @@ public final class HudState {
 
 		List<Row> materials = buildRows(goal.perCraftMaterials, crafts, true);
 		List<Row> ingredients = buildRows(goal.perCraftIngredients, crafts, false);
+		// Strictly track only the pinned base ingredient tier (T1/T2/T3); hide unpinned tiers.
+		if (goal.tier > 0) {
+			materials = filterRowsByTier(materials, goal.tier);
+			ingredients = filterRowsByTier(ingredients, goal.tier);
+		}
 
 		// Compact column layout: names on the left, counts in a right-aligned column
 		// with a fixed gap, instead of stretching the counts to the far panel edge.
@@ -389,18 +419,43 @@ public final class HudState {
 			complete ? C_GREEN : C_MUTED, false);
 	}
 
+	/** Filters rows to only the rows for the given tier (T1/T2/T3), e.g. {@code "dernic meat t1"}. */
+	private List<Row> filterRowsByTier(List<Row> rows, int tier) {
+		List<Row> result = new ArrayList<>();
+		if (rows == null || rows.isEmpty() || tier <= 0) {
+			return rows;
+		}
+		for (Row row : rows) {
+			String name = row.name == null ? "" : row.name.toLowerCase(Locale.ROOT);
+			String tierSuffix = " t" + tier;
+			if (name.endsWith(tierSuffix)) {
+				result.add(row);
+			}
+		}
+		return result;
+	}
+
 	private List<Row> buildRows(Map<String, Integer> perCraft, long crafts, boolean speedScaled) {
 		List<Row> rows = new ArrayList<>();
 		if (perCraft == null) {
 			return rows;
 		}
 		double materialMultiplier = speedScaled && speedBomb ? 0.5 : 1.0;
-		// Goals saved before the "Refined" prefix was removed may still carry both names;
-		// merge them into one canonical row so the panel never shows duplicates.
+		// Keep tier-differentiated entries separate (e.g., "dernic meat t1", "dernic meat t2")
+		// rather than merging them by canonical name so the HUD shows dedicated lines per tier.
 		Map<String, Integer> merged = new LinkedHashMap<>();
 		for (Map.Entry<String, Integer> entry : perCraft.entrySet()) {
 			int amount = entry.getValue() == null ? 0 : entry.getValue();
-			merged.merge(MaterialNames.canonical(entry.getKey()), amount, Integer::sum);
+			String key = entry.getKey();
+			// If the key already contains a tier suffix (t1/t2/t3), preserve it separately;
+			// otherwise use canonical form to merge duplicate base names.
+			if (key != null && key.matches(".* t[123]$")) {
+				// Tier-differentiated key: don't merge across tiers
+				merged.merge(key, amount, Integer::sum);
+			} else {
+				// Base name without tier: merge to avoid duplicates
+				merged.merge(MaterialNames.canonical(key), amount, Integer::sum);
+			}
 		}
 		for (Map.Entry<String, Integer> entry : merged.entrySet()) {
 			long required = (long) Math.ceil(entry.getValue() * (double) crafts * materialMultiplier);
@@ -460,6 +515,15 @@ public final class HudState {
 	}
 
 	private void refresh(Minecraft client) {
+		if (client == null || client.player == null) {
+			return;
+		}
+		// Strict filtering: skip HUD updates for gathering professions (Mining, Fishing, Farming, Woodcutting)
+		String skill = goal != null ? goal.skill : null;
+		if (skill != null && ProfessionConfig.isGatheringProfession(skill)) {
+			LOGGER.debug("WynncraftHelper: skipping HUD refresh for gathering profession {}", skill);
+			return;
+		}
 		long now = System.currentTimeMillis();
 		if (now - lastScanAt < SCAN_INTERVAL_MS) {
 			return;
@@ -513,20 +577,45 @@ public final class HudState {
 			return 0;
 		}
 		// A player-registered link always wins over the automatic name match.
+		// Check for tier-differentiated manual links first (e.g., "dernic meat t1", "dernic meat t2")
 		ManualItem manual = ProfessionConfig.manualItem(canonical);
+		if (manual == null) {
+			// Try with tier suffixes: t1, t2, t3
+			for (int tier = 1; tier <= 3; tier++) {
+				String tierKey = canonical + " t" + tier;
+				manual = ProfessionConfig.manualItem(tierKey);
+				if (manual != null) {
+					break;
+				}
+			}
+		}
 		int total = 0;
-		for (ItemCount item : inventoryCounts) {
-			if (matches(manual, canonical, item)) {
-				total += item.count;
+		if (manual != null) {
+			for (ItemCount item : inventoryCounts) {
+				if (manual.matches(item.normalizedName)) {
+					total += item.count;
+				}
 			}
-		}
-		for (ItemCount item : pouchCounts) {
-			if (matches(manual, canonical, item)) {
-				total += item.count;
+			for (ItemCount item : pouchCounts) {
+				if (manual.matches(item.normalizedName)) {
+					total += item.count;
+				}
 			}
-		}
-		if (manual != null && manual.ratio() > 1) {
-			total /= manual.ratio();
+			if (manual.ratio() > 1) {
+				total /= manual.ratio();
+			}
+		} else {
+			// No manual link found; fall through to automatic name matching
+			for (ItemCount item : inventoryCounts) {
+				if (matches(manual, canonical, item)) {
+					total += item.count;
+				}
+			}
+			for (ItemCount item : pouchCounts) {
+				if (matches(manual, canonical, item)) {
+					total += item.count;
+				}
+			}
 		}
 		return total;
 	}

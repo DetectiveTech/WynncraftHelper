@@ -1581,7 +1581,8 @@ public class WynncraftHelperScreen extends Screen {
 		pinButtonY = py;
 		pinButtonW = pinW;
 		pinButtonH = pinH;
-		boolean pinnedHere = HudState.INSTANCE.isPinned(recipe.internalName);
+		int pinnedTier = detailOption != null && detailOption.ingredient != null ? detailOption.ingredient.tierIndex() : 0;
+		boolean pinnedHere = HudState.INSTANCE.isPinned(recipe.internalName, pinnedTier);
 		boolean pinHover = mousesOver(mouseX, mouseY, px, py, pinW, pinH);
 		context.fill(px, py, px + pinW, py + pinH, pinHover ? C_CARD_BORDER : C_CARD);
 		context.fill(px, py, px + pinW, py + 1, pinnedHere ? C_ACCENT : C_GOLD);
@@ -1601,7 +1602,8 @@ public class WynncraftHelperScreen extends Screen {
 		if (detailOption == null || detailOption.recipe == null) {
 			return;
 		}
-		if (HudState.INSTANCE.isPinned(detailOption.recipe.internalName)) {
+		int pinnedTier = detailOption.ingredient != null ? detailOption.ingredient.tierIndex() : 0;
+		if (HudState.INSTANCE.isPinned(detailOption.recipe.internalName, pinnedTier)) {
 			HudState.INSTANCE.unpin();
 			return;
 		}
@@ -1629,6 +1631,24 @@ public class WynncraftHelperScreen extends Screen {
 			if (slots > 0) {
 				goal.perCraftIngredients.put(option.ingredient.name, slots);
 			}
+		}
+		// Capture the pinned ingredient tier (T1/T2/T3) so the HUD tracks only that tier.
+		goal.tier = option.ingredient == null ? 0 : option.ingredient.tierIndex();
+		goal.pinnedIngredientName = option.ingredient == null ? null : option.ingredient.name;
+		// When a tier is pinned, qualify the base material keys with that tier so the HUD
+		// renders a dedicated line per tier instead of aggregating all tiers together.
+		if (goal.tier > 0 && goal.pinnedIngredientName != null) {
+			String tierTag = " t" + goal.tier;
+			Map<String, Integer> tierMaterials = new LinkedHashMap<>();
+			for (Map.Entry<String, Integer> entry : goal.perCraftMaterials.entrySet()) {
+				String key = entry.getKey();
+				if (key != null && key.matches(".* t[123]$")) {
+					tierMaterials.put(key, entry.getValue());
+				} else {
+					tierMaterials.put(key + tierTag, entry.getValue());
+				}
+			}
+			goal.perCraftMaterials = tierMaterials;
 		}
 		return goal;
 	}
