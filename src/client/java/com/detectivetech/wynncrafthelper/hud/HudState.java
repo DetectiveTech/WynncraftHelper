@@ -499,7 +499,25 @@ public final class HudState {
 				merged.merge(MaterialNames.canonical(key), amount, Integer::sum);
 			}
 		}
+		// Expand tier-less base names into per-tier rows when the player has registered
+		// tier-specific manual links (e.g. "Dernic Meat t1", "Dernic Meat t2"). This lets
+		// the HUD show separate rows per tier instead of merging all tiers together.
+		Map<String, Integer> expanded = new LinkedHashMap<>();
 		for (Map.Entry<String, Integer> entry : merged.entrySet()) {
+			String key = entry.getKey();
+			int amount = entry.getValue();
+			boolean hasTierLinks = false;
+			for (int t = 1; t <= 3; t++) {
+				if (ProfessionConfig.manualItem(key + " t" + t) != null) {
+					expanded.merge(key + " t" + t, amount, Integer::sum);
+					hasTierLinks = true;
+				}
+			}
+			if (!hasTierLinks) {
+				expanded.put(key, amount);
+			}
+		}
+		for (Map.Entry<String, Integer> entry : expanded.entrySet()) {
 			long required = (long) Math.ceil(entry.getValue() * (double) crafts * materialMultiplier);
 			rows.add(new Row(entry.getKey(), displayName(entry.getKey()), currentCount(entry.getKey()), required));
 		}
