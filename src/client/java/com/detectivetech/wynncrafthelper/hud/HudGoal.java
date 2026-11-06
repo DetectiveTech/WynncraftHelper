@@ -27,4 +27,8 @@ public class HudGoal {
 	public Map<String, Integer> perCraftMaterials = new LinkedHashMap<>();
 	/** Ingredient name to slots consumed per craft. */
 	public Map<String, Integer> perCraftIngredients = new LinkedHashMap<>();
+	/** Ingredient tier (T1=1, T2=2, T3=3) captured at pin time; 0 when unset. */
+	public int tier = 0;
+	/** Ingredient name captured at pin time (e.g. {@code Dernic Meat}). */
+	public String pinnedIngredientName = null;
 }
