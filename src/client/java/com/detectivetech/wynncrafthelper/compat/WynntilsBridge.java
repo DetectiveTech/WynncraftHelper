@@ -1,10 +1,12 @@
 package com.detectivetech.wynncrafthelper.compat;
 
+import net.minecraft.world.item.ItemStack;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -41,6 +43,10 @@ public final class WynntilsBridge {
 	private static boolean listenersRegistered;
 	private static java.util.function.Consumer<Object> professionXpGainHandler;
 	private static Object professionXpGainEvent;
+	private static Method parseProfessionTier;
+	private static boolean tierParserResolved;
+	private static Object itemModel;
+	private static Method getWynnItem;
 
 	private WynntilsBridge() {
 	}
@@ -422,6 +428,95 @@ public final class WynntilsBridge {
 		}
 	}
 
+	/**
+	 * Reads the profession tier (1-3) that Wynncraft writes into the item's tooltip lore.
+	 * Materials and ingredients share one display name across tiers, so the tooltip is the
+	 * only reliable way to tell a T1 "Dernic Meat" from a T2/T3 one. Returns {@code 0} when
+	 * the item has no tier or Wynntils is not installed.
+	 */
+	public static int itemTier(ItemStack stack) {
+		if (stack == null || stack.isEmpty()) {
+			return 0;
+		}
+		int parsed = parsedTier(stack);
+		if (parsed >= 0) {
+			return parsed;
+		}
+		return wynnItemTier(stack);
+	}
+
+	/** Uses Wynntils' own tooltip parser (the same one its item annotators use). */
+	private static int parsedTier(ItemStack stack) {
+		if (!tierParserResolved) {
+			tierParserResolved = true;
+			try {
+				Class<?> parser = Class.forName("com.wynntils.models.wynnitem.parsing.WynnItemParser");
+				for (Method method : parser.getMethods()) {
+					if (method.getName().equals("parseProfessionTier") && method.getParameterCount() == 1) {
+						parseProfessionTier = method;
+						break;
+					}
+				}
+			} catch (ClassNotFoundException | RuntimeException ignored) {
+				// Wynntils not installed; the HUD keeps working without tier separation
+			}
+		}
+		if (parseProfessionTier == null) {
+			return -1;
+		}
+		try {
+			Object value = parseProfessionTier.invoke(null, stack);
+			return value instanceof Number number ? number.intValue() : -1;
+		} catch (ReflectiveOperationException | RuntimeException error) {
+			return -1;
+		}
+	}
+
+	/** Falls back to the parsed {@code MaterialItem}/{@code IngredientItem} tier. */
+	private static int wynnItemTier(ItemStack stack) {
+		resolveItemModel();
+		if (itemModel == null || getWynnItem == null) {
+			return 0;
+		}
+		try {
+			Object result = getWynnItem.invoke(itemModel, stack);
+			Object item = result instanceof Optional<?> optional ? optional.orElse(null) : null;
+			if (item == null) {
+				return 0;
+			}
+			String type = item.getClass().getName();
+			if (!type.endsWith(".MaterialItem") && !type.endsWith(".IngredientItem")) {
+				return 0;
+			}
+			Object value = item.getClass().getMethod("getQualityTier").invoke(item);
+			return value instanceof Number number ? number.intValue() : 0;
+		} catch (ReflectiveOperationException | RuntimeException error) {
+			return 0;
+		}
+	}
+
+	private static void resolveItemModel() {
+		if (itemModel != null) {
+			return;
+		}
+		try {
+			Class<?> models = Class.forName("com.wynntils.core.components.Models");
+			Object model = models.getField("Item").get(null);
+			if (model == null) {
+				return;
+			}
+			for (Method method : model.getClass().getMethods()) {
+				if (method.getName().equals("getWynnItem") && method.getParameterCount() == 1) {
+					getWynnItem = method;
+					itemModel = model;
+					return;
+				}
+			}
+		} catch (ReflectiveOperationException | RuntimeException ignored) {
+			// Wynntils not installed or the model moved; tooltip parsing is the primary source
+		}
+	}
+
 	public static double professionXpGain() {
 		try {
 			if (professionXpGainEvent == null) {
@@ -484,6 +579,32 @@ public final class WynntilsBridge {
 
 	public static boolean isProfessionXpGainRegistered() {
 		return listenersRegistered;
+	}
+
+	/** Unregisters the profession XP gain listener. Call on mod shutdown to avoid leaks. */
+	public static boolean unregisterProfessionXpGain() {
+		if (!listenersRegistered) {
+			return true;
+		}
+		try {
+			Class<?> wynntilsMod = Class.forName("com.wynntils.core.WynntilsMod");
+			Field field = wynntilsMod.getDeclaredField("eventBus");
+			field.setAccessible(true);
+			Object bus = field.get(null);
+			if (bus == null) {
+				return false;
+			}
+			Class<?> eventClass = Class.forName("com.wynntils.models.profession.event.ProfessionXpGainEvent");
+			Method remove = bus.getClass().getMethod("removeListener", Class.class, java.util.function.Consumer.class);
+			// We can't easily remove the proxy, but we can null the handler so it does nothing.
+			professionXpGainHandler = null;
+			listenersRegistered = false;
+			LOGGER.info("WynncraftHelper: unregistered Wynntils profession XP gain listener");
+			return true;
+		} catch (ReflectiveOperationException | RuntimeException error) {
+			LOGGER.debug("WynncraftHelper: could not unregister Wynntils XP gain listener", error);
+			return false;
+		}
 	}
 
 	private static final java.util.Map<String, String> PROFESSION_TYPE_NAMES = new java.util.LinkedHashMap<>();

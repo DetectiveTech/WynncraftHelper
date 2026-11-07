@@ -13,11 +13,16 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientWorldEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
-import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientWorldEvents;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenMouseEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
@@ -32,6 +37,11 @@ public class WynncraftHelperClient implements ClientModInitializer {
 	public static final KeyMapping TOGGLE_HUD_KEYBIND = KeyBindingHelper.registerKeyBinding(new KeyMapping(
 		"key.wynncrafthelper.togglehud",
 		GLFW.GLFW_KEY_X,
+		KeyMapping.Category.MISC
+	));
+	public static final KeyMapping TOGGLE_MEASURE_KEYBIND = KeyBindingHelper.registerKeyBinding(new KeyMapping(
+		"key.wynncrafthelper.togglemeasure",
+		GLFW.GLFW_KEY_M,
 		KeyMapping.Category.MISC
 	));
 
@@ -102,18 +112,27 @@ public class WynncraftHelperClient implements ClientModInitializer {
 		ClientWorldEvents.AFTER_CLIENT_WORLD_CHANGE.register((client, world) -> {
 			syncBombBonus();
 			HudState.INSTANCE.resetPouch();
+			EmpiricalXp.stopMeasure();
 			if (WynncraftHelperClient.screen != null) {
 				WynncraftHelperClient.screen.refreshForWorldChange();
 			}
 		});
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
-			if (!WynntilsBridge.isProfessionXpGainRegistered()) {
-				WynntilsBridge.registerProfessionXpGain(xpGainHandler);
-			}
 			EmpiricalXp.tick(client);
 			while (TOGGLE_HUD_KEYBIND.consumeClick()) {
 				HudState.INSTANCE.toggleVisible();
+			}
+			while (TOGGLE_MEASURE_KEYBIND.consumeClick()) {
+				if (EmpiricalXp.isMeasuring()) {
+					EmpiricalXp.stopMeasure();
+					client.player.displayClientMessage(Component.literal("WynncraftHelper: measurement stopped."), false);
+				} else if (HudState.INSTANCE.goal() != null) {
+					EmpiricalXp.startMeasure();
+					client.player.displayClientMessage(Component.literal("WynncraftHelper: measurement started."), false);
+				} else {
+					client.player.displayClientMessage(Component.literal("WynncraftHelper: pin a recipe first."), false);
+				}
 			}
 			boolean down = OPEN_KEYBIND.isDown();
 			if (down && !wasKeyDown) {
@@ -133,6 +152,7 @@ public class WynncraftHelperClient implements ClientModInitializer {
 			LiveProgress.Bus.unregister(liveListener);
 			liveListener = null;
 			screen = null;
+			WynntilsBridge.unregisterProfessionXpGain();
 		});
 	}
 
@@ -157,6 +177,23 @@ public class WynncraftHelperClient implements ClientModInitializer {
 		wasDoubleXpEvent = doubleXpEventNow;
 		LOGGER.info("WynncraftHelper: world bonus xpBomb={} speed={} doubleXpEvent={}",
 			xpBombNow, professionSpeedNow, doubleXpEventNow);
+		// Notify the player of bomb state changes
+		StringBuilder msg = new StringBuilder("WynncraftHelper: ");
+		if (xpBombNow != wasXpBomb) {
+			msg.append("XP Bomb ").append(xpBombNow ? "ACTIVE" : "inactive").append("; ");
+		}
+		if (professionSpeedNow != wasProfessionSpeed) {
+			msg.append("Speed Bomb ").append(professionSpeedNow ? "ACTIVE" : "inactive").append("; ");
+		}
+		if (doubleXpEventNow != wasDoubleXpEvent) {
+			msg.append("Double XP Event ").append(doubleXpEventNow ? "ACTIVE" : "inactive").append("; ");
+		}
+		if (msg.length() > "WynncraftHelper: ".length() + 2) {
+			Minecraft mc = Minecraft.getInstance();
+			if (mc != null && mc.player != null) {
+				mc.player.displayClientMessage(Component.literal(msg.toString()), false);
+			}
+		}
 		LiveProgress.Bus.emitWorldBonus(null, ProfessionConfig.doubleXpWeekend(), xpBombNow,
 			professionSpeedNow, doubleXpEventNow);
 	}

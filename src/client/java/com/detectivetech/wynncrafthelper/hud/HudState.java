@@ -18,6 +18,7 @@ import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -52,6 +53,8 @@ public final class HudState {
 	private static final int C_LABEL = 0xFF6E7A88;
 	private static final int C_GOLD = 0xFFFFC24B;
 	private static final int C_GREEN = 0xFF57D98A;
+	private static final int C_SILVER = 0xFFC3CAD4;
+	private static final int C_INGREDIENT = 0xFF7FB6FF;
 
 	private HudGoal goal;
 	private boolean visible;
@@ -91,6 +94,10 @@ public final class HudState {
 	private int lastLevel;
 	private int lastTarget;
 	private double lastProgress;
+	/** Cached map of normalized-name -> total count, rebuilt only when inventoryCounts changes. */
+	private Map<String, Integer> inventoryCountCache = Collections.emptyMap();
+	/** Cached map of pouch normalized-name -> total count. */
+	private Map<String, Integer> pouchCountCache = Collections.emptyMap();
 
 	private HudState() {
 		goal = ProfessionConfig.pinnedHudGoal();
@@ -232,6 +239,7 @@ public final class HudState {
 			addStack(counts, offhand);
 		}
 		inventoryCounts = counts;
+		inventoryCountCache = buildCountMap(counts);
 		if (client.screen instanceof AbstractContainerScreen<?> container) {
 			String title = MaterialNames.normalize(container.getTitle().getString());
 			if (title.contains("pouch") || title.contains("ingredient")) {
@@ -243,6 +251,7 @@ public final class HudState {
 					addStack(pouch, slot.getItem());
 				}
 				pouchCounts = pouch;
+				pouchCountCache = buildCountMap(pouch);
 			}
 		}
 	}
@@ -459,6 +468,14 @@ public final class HudState {
 		graphics.drawString(font, name, x + PAD, y, color, false);
 		graphics.drawString(font, counts, x + panelWidth - PAD - countsWidth, y,
 			complete ? C_GREEN : C_MUTED, false);
+		// Visual tier badge: T1=silver, T2=blue, T3=gold
+		int tier = tierSuffix(row.key == null ? "" : row.key);
+		if (tier > 0) {
+			int tierColor = tier == 1 ? C_SILVER : tier == 2 ? C_INGREDIENT : C_GOLD;
+			String badge = "T" + tier;
+			int badgeWidth = font.width(badge);
+			graphics.drawString(font, badge, x + panelWidth - PAD - countsWidth - badgeWidth - 4, y, tierColor, false);
+		}
 	}
 
 	/** Filters rows to only the rows for the given tier (T1/T2/T3), e.g. {@code "Dernic Meat t1"}. */
@@ -499,7 +516,25 @@ public final class HudState {
 				merged.merge(MaterialNames.canonical(key), amount, Integer::sum);
 			}
 		}
+		// Expand tier-less base names into per-tier rows when the player has registered
+		// tier-specific manual links (e.g. "Dernic Meat t1", "Dernic Meat t2"). This lets
+		// the HUD show separate rows per tier instead of merging all tiers together.
+		Map<String, Integer> expanded = new LinkedHashMap<>();
 		for (Map.Entry<String, Integer> entry : merged.entrySet()) {
+			String key = entry.getKey();
+			int amount = entry.getValue();
+			boolean hasTierLinks = false;
+			for (int t = 1; t <= 3; t++) {
+				if (ProfessionConfig.manualItem(key + " t" + t) != null) {
+					expanded.merge(key + " t" + t, amount, Integer::sum);
+					hasTierLinks = true;
+				}
+			}
+			if (!hasTierLinks) {
+				expanded.put(key, amount);
+			}
+		}
+		for (Map.Entry<String, Integer> entry : expanded.entrySet()) {
 			long required = (long) Math.ceil(entry.getValue() * (double) crafts * materialMultiplier);
 			rows.add(new Row(entry.getKey(), displayName(entry.getKey()), currentCount(entry.getKey()), required));
 		}
@@ -594,6 +629,7 @@ public final class HudState {
 				addStack(counts, offhand);
 			}
 			inventoryCounts = counts;
+			inventoryCountCache = buildCountMap(counts);
 
 			// The Ingredient Pouch is a normal container screen. Cache its contents so the
 			// counts stay available after the pouch is closed.
@@ -608,11 +644,27 @@ public final class HudState {
 						addStack(pouch, slot.getItem());
 					}
 					pouchCounts = pouch;
+					pouchCountCache = buildCountMap(pouch);
 				}
 			}
 		}
 	}
 
+	/** Builds a map of normalized-name + tier -> total count for O(1) lookups. */
+	private static Map<String, Integer> buildCountMap(List<ItemCount> counts) {
+		Map<String, Integer> result = new HashMap<>();
+		if (counts == null) {
+			return result;
+		}
+		for (ItemCount item : counts) {
+			if (item == null) {
+				continue;
+			}
+			String key = item.normalizedName + "|" + item.tier;
+			result.merge(key, item.count, Integer::sum);
+		}
+		return result;
+	}
 	private int currentCount(String name) {
 		String canonical = MaterialNames.canonical(name);
 		if (canonical.isEmpty()) {
@@ -624,23 +676,69 @@ public final class HudState {
 		String baseName = requiredTier > 0 ? stripTierSuffix(canonical) : canonical;
 
 		// A player-registered link always wins over the automatic name match. A tier-specific
-		// link is preferred over a generic one for the same base name.
+		// link is preferred over a generic one for the same base name. When the goal key has
+		// no tier suffix but the player registered a tier-specific link (e.g. "Dernic Meat t2"),
+		// use that tier so T1/T2/T3 aren't merged together.
 		ManualItem manual = requiredTier > 0
 			? ProfessionConfig.manualItem(baseName + " t" + requiredTier)
 			: null;
+		if (manual == null && requiredTier == 0) {
+			for (int t = 1; t <= 3; t++) {
+				ManualItem tierManual = ProfessionConfig.manualItem(baseName + " t" + t);
+				if (tierManual != null) {
+					manual = tierManual;
+					requiredTier = t;
+					break;
+				}
+			}
+		}
 		if (manual == null) {
 			manual = ProfessionConfig.manualItem(baseName);
 		}
 
 		int total = 0;
-		for (ItemCount item : inventoryCounts) {
-			if (matches(manual, baseName, requiredTier, item)) {
-				total += item.count;
+		// Use pre-computed count caches for O(1) tier-based lookups instead of iterating
+		// every ItemCount object per row.
+		if (manual == null) {
+			// No manual item: exact name match via cache.
+			if (requiredTier > 0) {
+				String key = baseName.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", " ").trim() + "|" + requiredTier;
+				total += inventoryCountCache.getOrDefault(key, 0);
+				total += pouchCountCache.getOrDefault(key, 0);
+			} else {
+				// Tier-less: sum all tiers for this base name.
+				String baseLower = baseName.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", " ").trim();
+				for (int t = 0; t <= 3; t++) {
+					String key = baseLower + "|" + t;
+					total += inventoryCountCache.getOrDefault(key, 0);
+					total += pouchCountCache.getOrDefault(key, 0);
+				}
 			}
-		}
-		for (ItemCount item : pouchCounts) {
-			if (matches(manual, baseName, requiredTier, item)) {
-				total += item.count;
+		} else {
+			// Manual item: fall back to iterating cached entries (substring matching not cacheable).
+			for (Map.Entry<String, Integer> entry : inventoryCountCache.entrySet()) {
+				String[] parts = entry.getKey().split("\\|", 2);
+				if (parts.length == 2) {
+					int itemTier = Integer.parseInt(parts[1]);
+					if (!tierMatches(requiredTier, itemTier)) {
+						continue;
+					}
+					if (manual.matches(parts[0])) {
+						total += entry.getValue();
+					}
+				}
+			}
+			for (Map.Entry<String, Integer> entry : pouchCountCache.entrySet()) {
+				String[] parts = entry.getKey().split("\\|", 2);
+				if (parts.length == 2) {
+					int itemTier = Integer.parseInt(parts[1]);
+					if (!tierMatches(requiredTier, itemTier)) {
+						continue;
+					}
+					if (manual.matches(parts[0])) {
+						total += entry.getValue();
+					}
+				}
 			}
 		}
 		if (manual != null && manual.ratio() > 1) {

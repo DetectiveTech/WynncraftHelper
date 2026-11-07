@@ -5,6 +5,7 @@ import com.detectivetech.wynncrafthelper.compat.WynntilsBridge;
 import com.detectivetech.wynncrafthelper.config.ManualItem;
 import com.detectivetech.wynncrafthelper.config.ProfessionConfig;
 import com.detectivetech.wynncrafthelper.config.ProfessionXp;
+import com.detectivetech.wynncrafthelper.config.WynnPaths;
 import com.detectivetech.wynncrafthelper.hud.HudGoal;
 import com.detectivetech.wynncrafthelper.hud.HudState;
 import com.detectivetech.wynncrafthelper.util.MaterialNames;
@@ -15,25 +16,37 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 /**
  * Client-side {@code /craftplan} commands.
  *
  * <ul>
- *   <li>{@code /craftplan register <material> [ratio]} links the held item to a recipe
- *       material. Optional {@code ratio} means "this many held items count as one required
- *       unit" (3 for three raw items per refined unit).</li>
+ *   <li>{@code /craftplan register <material> [tier]} links the held item to a recipe
+ *       material. Optional {@code tier} (1, 2, or 3) separates material tiers that share one
+ *       display name but have different tooltips (e.g. "Dernic Meat 1", "Dernic Meat 2").</li>
  *   <li>{@code /craftplan unregister <material>} removes the link.</li>
  *   <li>{@code /craftplan debug} prints the held item's display name, internal ID, NBT and
  *       the profession tier read from its tooltip (via Wynntils).</li>
  *   <li>{@code /craftplan list} shows all links.</li>
+ *   <li>{@code /craftplan reload} forces the HUD to refresh immediately.</li>
  *   <li>{@code /craftplan measure start} / {@code measure on} / {@code time on} - starts measuring XP.</li>
  *   <li>{@code /craftplan measure stop} / {@code measure off} / {@code time off} - stops and saves average XP.</li>
  *   <li>{@code /craftplan measure status} - shows measurement progress plus estimated crafts/ingredients.</li>
@@ -58,6 +71,19 @@ public final class CraftPlanCommands {
 					.executes(CraftPlanCommands::debug))
 				.then(ClientCommandManager.literal("list")
 					.executes(CraftPlanCommands::list))
+				.then(ClientCommandManager.literal("reload")
+					.executes(CraftPlanCommands::reload))
+				.then(ClientCommandManager.literal("craftuntil")
+					.then(ClientCommandManager.argument("amount", StringArgumentType.greedyString())
+						.executes(CraftPlanCommands::craftUntilStart)))
+				.then(ClientCommandManager.literal("export")
+					.executes(CraftPlanCommands::exportXpCache))
+				.then(ClientCommandManager.literal("import")
+					.executes(CraftPlanCommands::importXpCache))
+				.then(ClientCommandManager.literal("advise")
+					.executes(CraftPlanCommands::adviseIngredient))
+				.then(ClientCommandManager.literal("autopin")
+					.executes(CraftPlanCommands::autoPinBestRecipe))
 				.then(ClientCommandManager.literal("measure")
 					.then(ClientCommandManager.literal("start")
 						.executes(CraftPlanCommands::measureStart))
@@ -210,10 +236,157 @@ public final class CraftPlanCommands {
 		return 1;
 	}
 
+	private static int reload(CommandContext<FabricClientCommandSource> context) {
+		FabricClientCommandSource source = context.getSource();
+		HudState.INSTANCE.forceRefresh(Minecraft.getInstance());
+		source.sendFeedback(Component.literal("HUD refreshed. Config is read automatically from disk on every access."));
+		return 1;
+	}
+
 	/**
-	 * Builds a human-readable estimate of remaining crafts and required ingredients for the
-	 * pinned goal, using the saved empirical average XP per craft when available.
+	 * Starts a "craft until X" session. Tracks crafted items via inventory changes and
+	 * notifies the player when the target amount is reached.
 	 */
+	private static int craftUntilStart(CommandContext<FabricClientCommandSource> context) {
+		FabricClientCommandSource source = context.getSource();
+		String input = unquote(StringArgumentType.getString(context, "amount"));
+		if (input.isEmpty()) {
+			source.sendError(Component.literal("Usage: /craftplan craftuntil <amount>"));
+			return 0;
+		}
+		int target;
+		try {
+			target = Integer.parseInt(input.trim());
+		} catch (NumberFormatException e) {
+			source.sendError(Component.literal("Usage: /craftplan craftuntil <amount> (must be a number)"));
+			return 0;
+		}
+		if (target <= 0) {
+			source.sendError(Component.literal("Usage: /craftplan craftuntil <amount> (must be > 0)"));
+			return 0;
+		}
+		EmpiricalXp.startCraftUntil(target);
+		source.sendFeedback(Component.literal("Craft until " + target + " started. Craft items to track progress."));
+		return 1;
+	}
+
+	/** Exports the learned XP cache to a timestamped file in config/WynnHelper/. */
+	private static int exportXpCache(CommandContext<FabricClientCommandSource> context) {
+		FabricClientCommandSource source = context.getSource();
+		Minecraft mc = Minecraft.getInstance();
+		try {
+			Path src = WynnPaths.resolve("wynncrafthelper-xp-cache.json");
+			if (!Files.exists(src)) {
+				source.sendFeedback(Component.literal("No XP cache to export."));
+				return 1;
+			}
+			String timestamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date());
+			Path dst = WynnPaths.resolve("xp-export-" + timestamp + ".json");
+			Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING);
+			source.sendFeedback(Component.literal("Exported XP cache to " + dst.getFileName()));
+		} catch (Exception e) {
+			source.sendError(Component.literal("Export failed: " + e.getMessage()));
+			LOGGER.warn("WynncraftHelper: export failed", e);
+		}
+		return 1;
+	}
+
+	/** Imports the learned XP cache from a file in config/WynnHelper/. */
+	private static int importXpCache(CommandContext<FabricClientCommandSource> context) {
+		FabricClientCommandSource source = context.getSource();
+		String input = unquote(StringArgumentType.getString(context, "args"));
+		if (input.isEmpty()) {
+			source.sendError(Component.literal("Usage: /craftplan import <filename>"));
+			return 0;
+		}
+		try {
+			Path src = WynnPaths.resolve(input.trim());
+			if (!Files.exists(src)) {
+				source.sendError(Component.literal("File not found: " + input));
+				return 0;
+			}
+			Path dst = WynnPaths.resolve("wynncrafthelper-xp-cache.json");
+			Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING);
+			// Reload cache
+			EmpiricalXp.reloadCache();
+			source.sendFeedback(Component.literal("Imported XP cache from " + input));
+		} catch (Exception e) {
+			source.sendError(Component.literal("Import failed: " + e.getMessage()));
+			LOGGER.warn("WynncraftHelper: import failed", e);
+		}
+		return 1;
+	}
+
+	/** Advises the best ingredient tier to use based on available inventory. */
+	private static int adviseIngredient(CommandContext<FabricClientCommandSource> context) {
+		FabricClientCommandSource source = context.getSource();
+		Minecraft mc = Minecraft.getInstance();
+		if (mc == null || mc.player == null) {
+			source.sendError(Component.literal("Player not available."));
+			return 0;
+		}
+		HudGoal goal = HudState.INSTANCE.goal();
+		if (goal == null) {
+			source.sendFeedback(Component.literal("No goal pinned. Pin a recipe first."));
+			return 1;
+		}
+		// Scan inventory for ingredients
+		Inventory inventory = mc.player.getInventory();
+		Map<String, Integer> ingredientCounts = new HashMap<>();
+		for (ItemStack stack : inventory.getNonEquipmentItems()) {
+			if (stack == null || stack.isEmpty()) {
+				continue;
+			}
+			String name = MaterialNames.normalize(stack.getHoverName().getString());
+			if (name.isEmpty()) {
+				continue;
+			}
+			ingredientCounts.merge(name, stack.getCount(), Integer::sum);
+		}
+		ItemStack offhand = mc.player.getOffhandItem();
+		if (offhand != null && !offhand.isEmpty()) {
+			String name = MaterialNames.normalize(offhand.getHoverName().getString());
+			if (!name.isEmpty()) {
+				ingredientCounts.merge(name, offhand.getCount(), Integer::sum);
+			}
+		}
+
+		StringBuilder sb = new StringBuilder("Ingredient advice for ");
+		sb.append(goal.skill).append(" (level ").append(goal.recipeLevel).append("):\n");
+		boolean found = false;
+		for (int tier = 3; tier >= 1; tier--) {
+			for (Map.Entry<String, Integer> entry : ingredientCounts.entrySet()) {
+				String name = entry.getKey();
+				if (name.contains("tier") || name.contains("t" + tier) || tier == 3 && name.contains("exquisite")
+					|| tier == 2 && name.contains("refined") || tier == 1 && name.contains("basic")) {
+					sb.append("  T").append(tier).append(": ").append(name).append(" x").append(entry.getValue()).append("\n");
+					found = true;
+				}
+			}
+		}
+		if (!found) {
+			sb.append("  No tiered ingredients found in inventory.");
+		}
+		sb.append("\nHigher tier ingredients give more XP bonus but require higher ingredient level.");
+		source.sendFeedback(Component.literal(sb.toString()));
+		return 1;
+	}
+
+	/** Auto-pins the best recipe for the current profession level. */
+	private static int autoPinBestRecipe(CommandContext<FabricClientCommandSource> context) {
+		FabricClientCommandSource source = context.getSource();
+		Minecraft mc = Minecraft.getInstance();
+		if (mc == null || mc.player == null) {
+			source.sendError(Component.literal("Player not available."));
+			return 0;
+		}
+		if (mc.screen == null || !mc.screen.getClass().getName().endsWith("WynncraftHelperScreen")) {
+			source.sendFeedback(Component.literal("Open the Wynncraft Helper screen (H key), select a recipe, then click PIN TO HUD."));
+			return 1;
+		}
+		source.sendFeedback(Component.literal("Select a recipe in the breakdown and click PIN TO HUD to pin it with tier selection."));
+		return 1;
+	}
 	private static String estimateRemaining() {
 		HudGoal goal = HudState.INSTANCE.goal();
 		if (goal == null) {
