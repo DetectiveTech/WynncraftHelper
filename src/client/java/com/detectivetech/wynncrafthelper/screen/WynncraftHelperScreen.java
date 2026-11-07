@@ -162,6 +162,8 @@ public class WynncraftHelperScreen extends Screen {
 	private int pinButtonY;
 	private int pinButtonW;
 	private int pinButtonH;
+	/** Last time the pin button was toggled, to prevent rapid spam. */
+	private long lastPinToggleMs;
 	public WynncraftHelperScreen(Minecraft client) {
 		super(Component.literal("Wynncraft Helper"));
 	}
@@ -1607,6 +1609,12 @@ public class WynncraftHelperScreen extends Screen {
 		if (detailOption == null || detailOption.recipe == null) {
 			return;
 		}
+		// Debounce: ignore rapid pin/unpin clicks (faster than 250ms apart)
+		long now = System.currentTimeMillis();
+		if (now - lastPinToggleMs < 250L) {
+			return;
+		}
+		lastPinToggleMs = now;
 		// Use the tier the player selected in the breakdown preview (T1/T2/T3).
 		// Fall back to the option's ingredient tier, then 0 (all tiers).
 		int pinnedTier = breakdownSelectedTier > 0 ? breakdownSelectedTier

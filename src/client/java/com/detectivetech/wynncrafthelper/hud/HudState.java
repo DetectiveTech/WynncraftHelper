@@ -340,8 +340,8 @@ public final class HudState {
 		int screenW = client.getWindow().getGuiScaledWidth();
 		int screenH = client.getWindow().getGuiScaledHeight();
 
-		List<Row> materials = buildRows(goal.perCraftMaterials, crafts, true);
-		List<Row> ingredients = buildRows(goal.perCraftIngredients, crafts, false);
+		List<Row> materials = buildRows(goal.perCraftMaterials, crafts, true, goal.tier);
+		List<Row> ingredients = buildRows(goal.perCraftIngredients, crafts, false, goal.tier);
 		// Strictly track only the pinned base ingredient tier (T1/T2/T3); hide unpinned tiers.
 		if (goal.tier > 0) {
 			materials = filterRowsByTier(materials, goal.tier);
@@ -494,7 +494,7 @@ public final class HudState {
 		return result;
 	}
 
-	private List<Row> buildRows(Map<String, Integer> perCraft, long crafts, boolean speedScaled) {
+	private List<Row> buildRows(Map<String, Integer> perCraft, long crafts, boolean speedScaled, int pinnedTier) {
 		List<Row> rows = new ArrayList<>();
 		if (perCraft == null) {
 			return rows;
@@ -516,23 +516,27 @@ public final class HudState {
 				merged.merge(MaterialNames.canonical(key), amount, Integer::sum);
 			}
 		}
-		// Expand tier-less base names into per-tier rows when the player has registered
-		// tier-specific manual links (e.g. "Dernic Meat t1", "Dernic Meat t2"). This lets
-		// the HUD show separate rows per tier instead of merging all tiers together.
+		// Expand tier-less base names into per-tier rows only when a specific tier is pinned.
+		// When no tier is pinned (pinnedTier == 0), show a single row per base material instead
+		// of creating separate T1/T2/T3 lines that would all show at once.
 		Map<String, Integer> expanded = new LinkedHashMap<>();
-		for (Map.Entry<String, Integer> entry : merged.entrySet()) {
-			String key = entry.getKey();
-			int amount = entry.getValue();
-			boolean hasTierLinks = false;
-			for (int t = 1; t <= 3; t++) {
-				if (ProfessionConfig.manualItem(key + " t" + t) != null) {
-					expanded.merge(key + " t" + t, amount, Integer::sum);
-					hasTierLinks = true;
+		if (pinnedTier > 0) {
+			for (Map.Entry<String, Integer> entry : merged.entrySet()) {
+				String key = entry.getKey();
+				int amount = entry.getValue();
+				boolean hasTierLinks = false;
+				for (int t = 1; t <= 3; t++) {
+					if (ProfessionConfig.manualItem(key + " t" + t) != null) {
+						expanded.merge(key + " t" + t, amount, Integer::sum);
+						hasTierLinks = true;
+					}
+				}
+				if (!hasTierLinks) {
+					expanded.put(key, amount);
 				}
 			}
-			if (!hasTierLinks) {
-				expanded.put(key, amount);
-			}
+		} else {
+			expanded.putAll(merged);
 		}
 		for (Map.Entry<String, Integer> entry : expanded.entrySet()) {
 			long required = (long) Math.ceil(entry.getValue() * (double) crafts * materialMultiplier);
