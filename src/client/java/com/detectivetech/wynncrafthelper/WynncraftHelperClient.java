@@ -126,6 +126,13 @@ public class WynncraftHelperClient implements ClientModInitializer {
 			while (TOGGLE_MEASURE_KEYBIND.consumeClick()) {
 				if (EmpiricalXp.isMeasuring()) {
 					EmpiricalXp.stopMeasure();
+					// Reset the screen's liveCraftXp so the HUD/screen recalculates using the
+					// current world multiplier and the freshly saved empirical average, instead
+					// of a stale single-craft value that would make craft counts drop by 2.
+					if (screen != null) {
+						screen.clearLiveCraftXp();
+						screen.refreshProfession();
+					}
 					client.player.displayClientMessage(Component.literal("WynncraftHelper: measurement stopped."), false);
 				} else if (HudState.INSTANCE.goal() != null) {
 					EmpiricalXp.startMeasure();

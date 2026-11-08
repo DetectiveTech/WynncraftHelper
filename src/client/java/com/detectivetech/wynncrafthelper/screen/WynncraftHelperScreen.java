@@ -13,6 +13,7 @@ import com.detectivetech.wynncrafthelper.config.ProfessionXp;
 import com.detectivetech.wynncrafthelper.hud.HudGoal;
 import com.detectivetech.wynncrafthelper.hud.HudState;
 import com.detectivetech.wynncrafthelper.util.MaterialNames;
+import com.detectivetech.wynncrafthelper.xp.EmpiricalXp;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
@@ -364,7 +365,7 @@ public class WynncraftHelperScreen extends Screen {
 		ProfessionConfig.setTarget(selectedSkill, targetLevel + delta);
 		refreshProfession();
 	}
-	private void refreshProfession() {
+	public void refreshProfession() {
 		searchOpen = false;
 		searchResults.clear();
 		searchMessage = null;
@@ -450,6 +451,13 @@ public class WynncraftHelperScreen extends Screen {
 			liveCraftXp = gainedXp;
 			refreshProfession();
 		}
+	}
+
+	/** Clears the cached live craft XP so the screen recalculates using the current world
+	 *  multiplier and any saved empirical average instead of a stale single-craft value. */
+	public void clearLiveCraftXp() {
+		liveCraftXp = 0;
+		refreshProfession();
 	}
 
 	/**
@@ -1763,7 +1771,7 @@ public class WynncraftHelperScreen extends Screen {
 			}
 			Ingredient ing = ingredientFor(selectedSkill, level);
 			double mult = ingredientMultiplier(ing, level);
-			double perCraft = liveCraftXp > 0 ? liveCraftXp : recipe.xp * world * mult;
+			double perCraft = effectiveXpPerCraft(recipe, mult);
 			long crafts = ceilDiv(cardRemaining, perCraft);
 			options.add(new CraftOption(recipe, crafts, resourcesFor(recipe, crafts),
 				crafts * slotCount(), ing, mult));
@@ -1785,7 +1793,7 @@ public class WynncraftHelperScreen extends Screen {
 			Recipe recipe = best.get(0);
 			Ingredient ingredient = ingredientFor(selectedSkill, level);
 			double ingredientMultiplier = ingredientMultiplier(ingredient, level);
-			long crafts = ceilDiv(remaining, liveCraftXp > 0 ? liveCraftXp : recipe.xp * world * ingredientMultiplier);
+			long crafts = ceilDiv(remaining, effectiveXpPerCraft(recipe, ingredientMultiplier));
 			long baseCrafts = ceilDiv(remaining, recipe.xp * world);
 			planCrafts += crafts;
 			planBaseCrafts += baseCrafts;
@@ -1874,6 +1882,26 @@ public class WynncraftHelperScreen extends Screen {
 		// apply the same 2x XP bonus. They do not stack with each other: the craft reduction
 		// is capped at a single 2x (crafts / 2).
 		return (doubleXpWeekend || xpBomb || doubleXpEvent) ? 2.0 : 1.0;
+	}
+
+	/**
+	 * Returns the effective XP per craft for {@code recipe}. Uses the live measured value
+	 * when set, otherwise the saved empirical average (from measuring), otherwise falls
+	 * back to the recipe base XP with world and ingredient multipliers.
+	 */
+	private double effectiveXpPerCraft(Recipe recipe, double ingredientMult) {
+		if (liveCraftXp > 0) {
+			return liveCraftXp;
+		}
+		HudGoal goal = HudState.INSTANCE.goal();
+		String sig = goal != null ? EmpiricalXp.signatureFor(goal) : null;
+		if (sig != null) {
+			Double empirical = EmpiricalXp.lookup(sig);
+			if (empirical != null && empirical > 0) {
+				return empirical;
+			}
+		}
+		return recipe.xp * worldMultiplier() * ingredientMult;
 	}
 	/** The Profession Speed Bomb halves the base materials needed, the XP ingredients stay untouched. */
 	private double materialMultiplier() {
