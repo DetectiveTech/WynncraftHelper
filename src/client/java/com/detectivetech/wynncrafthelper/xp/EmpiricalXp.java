@@ -7,6 +7,7 @@ import com.detectivetech.wynncrafthelper.config.WynnPaths;
 import com.detectivetech.wynncrafthelper.hud.HudGoal;
 import com.detectivetech.wynncrafthelper.hud.HudState;
 import com.detectivetech.wynncrafthelper.util.MaterialNames;
+import com.detectivetech.wynncrafthelper.xp.CraftSessionLogger;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.minecraft.client.Minecraft;
@@ -147,6 +148,7 @@ public final class EmpiricalXp {
 						craftPending = false;
 						pendingSnapshot = null;
 						LOGGER.info("EmpiricalXp: measure craft {} gained {} (wynntils xp)", measureCount, gained);
+						logSessionCraft(gained);
 						if (client.player != null) {
 							client.player.displayClientMessage(Component.literal(
 									"Measuring: craft " + measureCount + " gained " + (long) gained + " XP."), false);
@@ -154,6 +156,7 @@ public final class EmpiricalXp {
 					} else {
 						measureTotalXp += gained;
 						measureCount++;
+						logSessionCraft(gained);
 						Map<String, Integer> current = HudState.INSTANCE.inventorySnapshot(client);
 						lastSnapshot = new HashMap<>(current);
 						pendingSnapshot = null;
@@ -204,6 +207,7 @@ public final class EmpiricalXp {
 					LOGGER.info("EmpiricalXp: learned {} XP (avg) for consumed {}", updated, consumedSignature);
 				}
 			}
+			logSessionCraft(gained, goal, consumed);
 			save();
 			if (client.player != null) {
 				client.player.displayClientMessage(Component.literal(
@@ -212,6 +216,28 @@ public final class EmpiricalXp {
 		} catch (Exception error) {
 			LOGGER.warn("EmpiricalXp: onXpGain failed", error);
 		}
+	}
+
+	/**
+	 * Logs a confirmed craft to the session file. Used by the measuring paths where
+	 * ingredient consumption isn't available.
+	 */
+	private static void logSessionCraft(double gained) {
+		HudGoal goal = HudState.INSTANCE.goal();
+		String skill = goal != null ? goal.skill : ProfessionConfig.selected();
+		String recipeName = goal != null ? goal.recipeName : null;
+		int level = ProfessionConfig.level(skill);
+		CraftSessionLogger.logCraft(skill, recipeName, (long) gained, level, level, null);
+	}
+
+	/**
+	 * Logs a confirmed craft to the session file, including ingredient consumption.
+	 */
+	private static void logSessionCraft(double gained, HudGoal goal, Map<String, Integer> consumed) {
+		String skill = goal != null ? goal.skill : ProfessionConfig.selected();
+		String recipeName = goal != null ? goal.recipeName : null;
+		int level = ProfessionConfig.level(skill);
+		CraftSessionLogger.logCraft(skill, recipeName, (long) gained, level, level, consumed);
 	}
 
 	/**
