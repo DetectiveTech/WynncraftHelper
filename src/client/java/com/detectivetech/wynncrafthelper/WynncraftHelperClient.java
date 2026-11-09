@@ -1,6 +1,7 @@
 package com.detectivetech.wynncrafthelper;
 
 import com.detectivetech.wynncrafthelper.api.LiveProgress;
+import com.detectivetech.wynncrafthelper.api.WynncraftApiClient;
 import com.detectivetech.wynncrafthelper.api.WynncraftEvents;
 import com.detectivetech.wynncrafthelper.compat.WynntilsBridge;
 import com.detectivetech.wynncrafthelper.command.CraftPlanCommands;
@@ -9,10 +10,6 @@ import com.detectivetech.wynncrafthelper.hud.HudState;
 import com.detectivetech.wynncrafthelper.screen.WynncraftHelperScreen;
 import com.detectivetech.wynncrafthelper.xp.EmpiricalXp;
 import net.fabricmc.api.ClientModInitializer;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientWorldEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientWorldEvents;
@@ -48,6 +45,7 @@ public class WynncraftHelperClient implements ClientModInitializer {
 	private static final Logger LOGGER = LoggerFactory.getLogger("WynncraftHelper");
 	private boolean wasKeyDown = false;
 	private int bombPollTicks;
+	private int wynntilsRetryTicks;
 	public static WynncraftHelperScreen screen;
 	private static LiveProgress liveListener;
 
@@ -120,6 +118,14 @@ public class WynncraftHelperClient implements ClientModInitializer {
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			EmpiricalXp.tick(client);
+			// Retry registering the Wynntils profession-XP listener until it succeeds (Wynntils'
+			// event bus may not be ready at mod-init time). Backed off so we don't hammer it.
+			if (!WynntilsBridge.isProfessionXpGainRegistered()) {
+				if (++wynntilsRetryTicks >= 40) {
+					wynntilsRetryTicks = 0;
+					WynntilsBridge.registerProfessionXpGain(xpGainHandler);
+				}
+			}
 			while (TOGGLE_HUD_KEYBIND.consumeClick()) {
 				HudState.INSTANCE.toggleVisible();
 			}
@@ -144,9 +150,13 @@ public class WynncraftHelperClient implements ClientModInitializer {
 			boolean down = OPEN_KEYBIND.isDown();
 			if (down && !wasKeyDown) {
 				LOGGER.info("WynncraftHelper: Open key (H) pressed, opening screen");
-				screen = new WynncraftHelperScreen(client);
-				client.setScreen(screen);
-				syncBombBonus();
+				// Only open the planner when no other screen is active, so we never clobber an
+				// open chat, container, or pause screen with our own.
+				if (client.screen == null) {
+					screen = new WynncraftHelperScreen(client);
+					client.setScreen(screen);
+					syncBombBonus();
+				}
 			}
 			wasKeyDown = down;
 			if (++bombPollTicks >= 20) {
@@ -156,10 +166,13 @@ public class WynncraftHelperClient implements ClientModInitializer {
 		});
 
 		ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
+			EmpiricalXp.resetSessionState();
 			LiveProgress.Bus.unregister(liveListener);
 			liveListener = null;
 			screen = null;
 			WynntilsBridge.unregisterProfessionXpGain();
+			WynncraftEvents.shutdown();
+			WynncraftApiClient.shutdown();
 		});
 	}
 

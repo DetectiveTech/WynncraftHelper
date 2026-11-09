@@ -56,6 +56,16 @@ public final class WynncraftEvents {
 		return doubleXpActive;
 	}
 
+	/** Shuts down the background event-fetch executor. Call on client stop. */
+	public static void shutdown() {
+		EXECUTOR.shutdownNow();
+		try {
+			EXECUTOR.awaitTermination(500, java.util.concurrent.TimeUnit.MILLISECONDS);
+		} catch (InterruptedException ignored) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
 	/**
 	 * Starts a background refresh when the cached result is older than
 	 * {@link #CACHE_TTL_MS}. Safe to call every tick; concurrent calls are coalesced.

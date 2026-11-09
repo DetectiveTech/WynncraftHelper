@@ -17,6 +17,8 @@ import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -98,6 +100,42 @@ public final class HudState {
 	private Map<String, Integer> inventoryCountCache = Collections.emptyMap();
 	/** Cached map of pouch normalized-name -> total count. */
 	private Map<String, Integer> pouchCountCache = Collections.emptyMap();
+
+	/** Composite key identifying the current recipe plan; rows are cached while it matches. */
+	private String lastPlanKey = "";
+	private List<Row> cachedMaterials = List.of();
+	private List<Row> cachedIngredients = List.of();
+
+	/** Auxiliary index: normalized item name -> list of [tier, count].
+	 * Built once per inventory refresh; used by {@link #currentCount()} manual branch
+	 * for O(uniqueNames) lookups instead of O(allEntries) scans with string splits. */
+	private Map<String, List<int[]>> nameTierIndex = Collections.emptyMap();
+
+	/** Rebuild the name->tier index from both count caches. Call after refresh(). */
+	private void rebuildNameTierIndex() {
+		Map<String, List<int[]>> idx = new HashMap<>();
+		mergeIntoNameTierIndex(idx, inventoryCountCache);
+		mergeIntoNameTierIndex(idx, pouchCountCache);
+		nameTierIndex = idx;
+	}
+
+	private static void mergeIntoNameTierIndex(Map<String, List<int[]>> target, Map<String, Integer> cache) {
+		for (Map.Entry<String, Integer> e : cache.entrySet()) {
+			String key = e.getKey();
+			int sep = key.indexOf('|');
+			if (sep <= 0) {
+				continue;
+			}
+			String name = key.substring(0, sep);
+			int tier;
+			try {
+				tier = Integer.parseInt(key.substring(sep + 1));
+			} catch (NumberFormatException ignored) {
+				continue;
+			}
+			target.computeIfAbsent(name, k -> new ArrayList<>()).add(new int[] { tier, e.getValue() });
+		}
+	}
 
 	private HudState() {
 		goal = ProfessionConfig.pinnedHudGoal();
@@ -327,21 +365,38 @@ public final class HudState {
 		long now = System.currentTimeMillis();
 		if (lastRenderAt == 0 || now - lastRenderAt > 500L) {
 			lastCrafts = (int) Math.min(Integer.MAX_VALUE, crafts);
+			lastLevel = level;
+			lastTarget = target;
+			lastProgress = progress;
+			lastRenderAt = now;
 		} else if (lastCrafts > 0 && lastProgress != progress && crafts < lastCrafts - 1) {
 			crafts = Math.max(0, lastCrafts - 1);
+			lastCrafts = (int) Math.min(Integer.MAX_VALUE, crafts);
+		} else {
+			crafts = lastCrafts;
 		}
-		lastCrafts = (int) Math.min(Integer.MAX_VALUE, crafts);
-		lastLevel = level;
-		lastTarget = target;
-		lastProgress = progress;
-		lastRenderAt = now;
 
 		Font font = client.font;
 		int screenW = client.getWindow().getGuiScaledWidth();
 		int screenH = client.getWindow().getGuiScaledHeight();
 
-		List<Row> materials = buildRows(goal.perCraftMaterials, crafts, true, goal.tier);
-		List<Row> ingredients = buildRows(goal.perCraftIngredients, crafts, false, goal.tier);
+		// P11: Cache built Row lists. Rebuild only when the recipe plan changes.
+		String planKey = goal.skill + "|" + goal.recipeName + "|" + goal.tier + "|"
+			+ (goal.perCraftMaterials == null ? 0 : goal.perCraftMaterials.hashCode()) + "|"
+			+ (goal.perCraftIngredients == null ? 0 : goal.perCraftIngredients.hashCode());
+		boolean planChanged = !planKey.equals(lastPlanKey);
+		if (planChanged) {
+			cachedMaterials = buildRows(goal.perCraftMaterials, crafts, true, goal.tier);
+			cachedIngredients = buildRows(goal.perCraftIngredients, crafts, false, goal.tier);
+			lastPlanKey = planKey;
+		}
+		// Update current/required from fresh crafts and inventory counts (O(rows) arithmetic)
+		double matMult = speedBomb ? 0.5 : 1.0;
+		updateRowValues(cachedMaterials, crafts, matMult);
+		updateRowValues(cachedIngredients, crafts, 1.0);
+
+		List<Row> materials = cachedMaterials;
+		List<Row> ingredients = cachedIngredients;
 		// Strictly track only the pinned base ingredient tier (T1/T2/T3); hide unpinned tiers.
 		if (goal.tier > 0) {
 			materials = filterRowsByTier(materials, goal.tier);
@@ -539,10 +594,18 @@ public final class HudState {
 			expanded.putAll(merged);
 		}
 		for (Map.Entry<String, Integer> entry : expanded.entrySet()) {
-			long required = (long) Math.ceil(entry.getValue() * (double) crafts * materialMultiplier);
-			rows.add(new Row(entry.getKey(), displayName(entry.getKey()), currentCount(entry.getKey()), required));
+			// Create Row with rawAmount only; current/required are set by updateRowValues()
+			rows.add(new Row(entry.getKey(), displayName(entry.getKey()), entry.getValue()));
 		}
 		return rows;
+	}
+
+	/** Update current/required values on cached Row objects. Called per frame. */
+	private void updateRowValues(List<Row> rows, long crafts, double multiplier) {
+		for (Row row : rows) {
+			row.current = currentCount(row.key);
+			row.required = (long) Math.ceil(row.rawAmount * crafts * multiplier);
+		}
 	}
 
 	private int measureHeight(List<Row> materials, List<Row> ingredients) {
@@ -651,6 +714,8 @@ public final class HudState {
 					pouchCountCache = buildCountMap(pouch);
 				}
 			}
+			// P12: Rebuild the name->tier index for O(uniqueNames) manual-item lookups
+			rebuildNameTierIndex();
 		}
 	}
 
@@ -719,28 +784,17 @@ public final class HudState {
 				}
 			}
 		} else {
-			// Manual item: fall back to iterating cached entries (substring matching not cacheable).
-			for (Map.Entry<String, Integer> entry : inventoryCountCache.entrySet()) {
-				String[] parts = entry.getKey().split("\\|", 2);
-				if (parts.length == 2) {
-					int itemTier = Integer.parseInt(parts[1]);
-					if (!tierMatches(requiredTier, itemTier)) {
-						continue;
-					}
-					if (manual.matches(parts[0])) {
-						total += entry.getValue();
-					}
+			// P12: Manual item — use nameTierIndex for O(uniqueNames) lookup instead of
+			// O(allEntries) iteration with string splits. The index maps normalized item
+			// name -> list of [tier, count] pairs, built once per refresh().
+			for (Map.Entry<String, List<int[]>> entry : nameTierIndex.entrySet()) {
+				String itemName = entry.getKey();
+				if (!manual.matches(itemName)) {
+					continue;
 				}
-			}
-			for (Map.Entry<String, Integer> entry : pouchCountCache.entrySet()) {
-				String[] parts = entry.getKey().split("\\|", 2);
-				if (parts.length == 2) {
-					int itemTier = Integer.parseInt(parts[1]);
-					if (!tierMatches(requiredTier, itemTier)) {
-						continue;
-					}
-					if (manual.matches(parts[0])) {
-						total += entry.getValue();
+				for (int[] tierCount : entry.getValue()) {
+					if (tierMatches(requiredTier, tierCount[0])) {
+						total += tierCount[1];
 					}
 				}
 			}
@@ -958,8 +1012,9 @@ public final class HudState {
 		return Math.max(min, Math.min(max, value));
 	}
 
+	private static final DecimalFormat FMT = new DecimalFormat("#,##0", DecimalFormatSymbols.getInstance(Locale.ROOT));
 	private static String fmt(long value) {
-		return String.format(Locale.ROOT, "%,d", value);
+		return FMT.format(value);
 	}
 
 	private static String trim(Font font, String text, int maxWidth) {
@@ -995,14 +1050,19 @@ public final class HudState {
 	private static final class Row {
 		private final String key;
 		private final String name;
-		private final int current;
-		private final long required;
+		/** Raw amount from the perCraft map, before crafts multiplication. Immutable per plan. */
+		private final int rawAmount;
+		/** Current inventory count. Updated per frame from cached counts. */
+		private int current;
+		/** Required count = ceil(rawAmount * crafts * multiplier). Updated per frame. */
+		private long required;
 
-		private Row(String key, String name, int current, long required) {
+		private Row(String key, String name, int rawAmount) {
 			this.key = key;
 			this.name = name;
-			this.current = current;
-			this.required = required;
+			this.rawAmount = rawAmount;
+			this.current = 0;
+			this.required = 0;
 		}
 	}
 }

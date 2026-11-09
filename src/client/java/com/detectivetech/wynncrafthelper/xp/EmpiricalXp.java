@@ -43,6 +43,13 @@ public final class EmpiricalXp {
 	private static final Object LOCK = new Object();
 	private static Map<String, Double> cache = new LinkedHashMap<>();
 	private static boolean loaded;
+	/** Single background writer for cache/session files so disk I/O never blocks the render thread. */
+	private static final java.util.concurrent.ExecutorService IO_WRITER =
+		java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+			Thread t = new Thread(r, "WynncraftHelper-XpIO");
+			t.setDaemon(true);
+			return t;
+		});
 
 	private static boolean isMeasuringEnabled;
 	private static double measureTotalXp;
@@ -71,6 +78,20 @@ public final class EmpiricalXp {
 			return;
 		}
 		ensureLoaded();
+		// Only track inventory deltas while a measurement or craft-until session is active.
+		// Tracking every tick while idle allocates a full snapshot map (with regex-heavy name
+		// normalization) on the render thread every tick — a recurring source of stutter.
+		boolean measuring;
+		synchronized (LOCK) {
+			measuring = isMeasuringEnabled || craftUntilEnabled;
+		}
+		if (!measuring) {
+			synchronized (LOCK) {
+				lastSnapshot = null;
+				pendingSnapshot = null;
+			}
+			return;
+		}
 		Map<String, Integer> current = HudState.INSTANCE.inventorySnapshot(client);
 		synchronized (LOCK) {
 			if (lastSnapshot == null) {
@@ -99,21 +120,21 @@ public final class EmpiricalXp {
 	 * event for a craft that tick() detected via inventory change.
 	 */
 	private static void recordPendingCraft() {
+		double estimatedXp;
+		int craftNum;
 		synchronized (LOCK) {
 			if (!isMeasuringEnabled || !craftPending) {
 				return;
 			}
 			craftPending = false;
 			pendingSnapshot = null;
-		}
-
-		measureCount++;
-		double estimatedXp = estimateBaseXp();
-		synchronized (LOCK) {
+			measureCount++;
+			craftNum = measureCount;
+			estimatedXp = estimateBaseXp();
 			measureTotalXp += estimatedXp;
 		}
 
-		LOGGER.info("EmpiricalXp: measure craft {} gained {} (inventory fallback, no wynntils xp)", measureCount, (long) estimatedXp);
+		LOGGER.info("EmpiricalXp: measure craft {} gained {} (inventory fallback, no wynntils xp)", craftNum, (long) estimatedXp);
 	}
 
 	private static double estimateBaseXp() {
@@ -272,6 +293,27 @@ public final class EmpiricalXp {
 		}
 		logSessionStart(goal);
 		return true;
+	}
+
+	/**
+	 * Resets all in-memory measurement/session state. Call on client stop and on world
+	 * change so stale measurement state never carries over between servers.
+	 */
+	public static void resetSessionState() {
+		synchronized (LOCK) {
+			lastSnapshot = null;
+			pendingSnapshot = null;
+			craftPending = false;
+			isMeasuringEnabled = false;
+			measureTotalXp = 0;
+			measureCount = 0;
+			measureSignature = null;
+			lastMeasureResult = null;
+			craftUntilEnabled = false;
+			craftUntilTarget = 0;
+			craftUntilCrafted = 0;
+			craftUntilPending = false;
+		}
 	}
 
 	public static boolean stopMeasure() {
@@ -459,16 +501,18 @@ public final class EmpiricalXp {
 	}
 
 	private static void save() {
-		try {
-			Path path = WynnPaths.resolve(FILE_NAME);
-			Map<String, Double> snapshot;
-			synchronized (LOCK) {
-				snapshot = new LinkedHashMap<>(cache);
+		IO_WRITER.submit(() -> {
+			try {
+				Path path = WynnPaths.resolve(FILE_NAME);
+				Map<String, Double> snapshot;
+				synchronized (LOCK) {
+					snapshot = new LinkedHashMap<>(cache);
+				}
+				Files.writeString(path, GSON.toJson(snapshot), StandardCharsets.UTF_8);
+			} catch (Exception ignored) {
+				// saving is best-effort
 			}
-			Files.writeString(path, GSON.toJson(snapshot), StandardCharsets.UTF_8);
-		} catch (Exception ignored) {
-			// saving is best-effort
-		}
+		});
 	}
 
 	private static void logSessionStart(HudGoal goal) {

@@ -23,6 +23,13 @@ import java.util.Map;
 public final class CraftSessionLogger {
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static final String FILE_NAME = "craft-sessions.json";
+	/** Single background writer so per-craft session logging never blocks the render thread. */
+	private static final java.util.concurrent.ExecutorService IO_WRITER =
+		java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+			Thread t = new Thread(r, "WynncraftHelper-SessionIO");
+			t.setDaemon(true);
+			return t;
+		});
 
 	private static List<Entry> entries = new ArrayList<>();
 	private static boolean loaded = false;
@@ -49,14 +56,16 @@ public final class CraftSessionLogger {
 	}
 
 	private static void save() {
-		try {
-			Path path = WynnPaths.resolve(FILE_NAME);
-			Data data = new Data();
-			data.entries = entries;
-			Files.writeString(path, GSON.toJson(data), StandardCharsets.UTF_8);
-		} catch (Exception ignored) {
-			// saving is best-effort
-		}
+		IO_WRITER.submit(() -> {
+			try {
+				Path path = WynnPaths.resolve(FILE_NAME);
+				Data data = new Data();
+				data.entries = entries;
+				Files.writeString(path, GSON.toJson(data), StandardCharsets.UTF_8);
+			} catch (Exception ignored) {
+				// saving is best-effort
+			}
+		});
 	}
 
 	/**

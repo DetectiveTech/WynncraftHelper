@@ -42,7 +42,9 @@ public final class WynntilsBridge {
 	private static Method professionXpOf;
 	private static boolean listenersRegistered;
 	private static java.util.function.Consumer<Object> professionXpGainHandler;
-	private static Object professionXpGainEvent;
+	private static Object xpGainProxy;
+	/** Written on Wynntils' event-bus thread, read on the render thread; must be volatile. */
+	private static volatile Object professionXpGainEvent;
 	private static Method parseProfessionTier;
 	private static boolean tierParserResolved;
 	private static Object itemModel;
@@ -549,25 +551,28 @@ public final class WynntilsBridge {
 			}
 			Class<?> eventClass = Class.forName("com.wynntils.models.profession.event.ProfessionXpGainEvent");
 			Class<?> consumerIface = Class.forName("java.util.function.Consumer");
-			Object proxy = java.lang.reflect.Proxy.newProxyInstance(
-				consumerIface.getClassLoader(),
-				new Class<?>[] { consumerIface },
-				(listenerProxy, method, args) -> {
-					try {
-						if (method.getName().equals("accept") && args != null && args.length > 0) {
-							professionXpGainEvent = args[0];
-							java.util.function.Consumer<Object> handlerRef = professionXpGainHandler;
-							if (handlerRef != null) {
-								handlerRef.accept(args[0]);
+			if (xpGainProxy == null) {
+				Object proxy = java.lang.reflect.Proxy.newProxyInstance(
+					consumerIface.getClassLoader(),
+					new Class<?>[] { consumerIface },
+					(proxyInstance, method, args) -> {
+						try {
+							if (method.getName().equals("accept") && args != null && args.length > 0) {
+								professionXpGainEvent = args[0];
+								java.util.function.Consumer<Object> handlerRef = professionXpGainHandler;
+								if (handlerRef != null) {
+									handlerRef.accept(args[0]);
+								}
 							}
+						} catch (Throwable ignored) {
+							// never let a listener crash the client
 						}
-					} catch (Throwable ignored) {
-						// never let a listener crash the client
-					}
-					return null;
-				});
+						return null;
+					});
+				xpGainProxy = proxy;
+			}
 			Method add = bus.getClass().getMethod("addListener", Class.class, java.util.function.Consumer.class);
-			add.invoke(bus, eventClass, proxy);
+			add.invoke(bus, eventClass, xpGainProxy);
 			listenersRegistered = true;
 			LOGGER.info("WynncraftHelper: registered Wynntils profession XP gain listener");
 			return true;
@@ -584,6 +589,8 @@ public final class WynntilsBridge {
 	/** Unregisters the profession XP gain listener. Call on mod shutdown to avoid leaks. */
 	public static boolean unregisterProfessionXpGain() {
 		if (!listenersRegistered) {
+			professionXpGainHandler = null;
+			professionXpGainEvent = null;
 			return true;
 		}
 		try {
@@ -592,12 +599,18 @@ public final class WynntilsBridge {
 			field.setAccessible(true);
 			Object bus = field.get(null);
 			if (bus == null) {
+				professionXpGainHandler = null;
+				professionXpGainEvent = null;
+				xpGainProxy = null;
+				listenersRegistered = false;
 				return false;
 			}
 			Class<?> eventClass = Class.forName("com.wynntils.models.profession.event.ProfessionXpGainEvent");
 			Method remove = bus.getClass().getMethod("removeListener", Class.class, java.util.function.Consumer.class);
-			// We can't easily remove the proxy, but we can null the handler so it does nothing.
+			remove.invoke(bus, eventClass, xpGainProxy);
 			professionXpGainHandler = null;
+			professionXpGainEvent = null;
+			xpGainProxy = null;
 			listenersRegistered = false;
 			LOGGER.info("WynncraftHelper: unregistered Wynntils profession XP gain listener");
 			return true;

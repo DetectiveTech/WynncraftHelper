@@ -98,6 +98,25 @@ public class WynncraftApiClient {
 			: AUTH_ITEM_REQUEST_INTERVAL_MS;
 	}
 
+	/**
+	 * Shuts down the shared background thread pools. Call once on client stop so the
+	 * daemon threads do not linger across world changes or restarts.
+	 */
+	public static void shutdown() {
+		PAGE_POOL.shutdownNow();
+		INGREDIENT_EXECUTOR.shutdownNow();
+		try {
+			PAGE_POOL.awaitTermination(500, java.util.concurrent.TimeUnit.MILLISECONDS);
+		} catch (InterruptedException ignored) {
+			Thread.currentThread().interrupt();
+		}
+		try {
+			INGREDIENT_EXECUTOR.awaitTermination(500, java.util.concurrent.TimeUnit.MILLISECONDS);
+		} catch (InterruptedException ignored) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
 	private List<String> loadTokens() {
 		List<String> result = new ArrayList<>();
 		try {
